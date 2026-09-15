@@ -99136,8 +99136,6 @@ async function ifort_win32_installWin32(inputs) {
             "--silent",
             "--eula",
             "accept",
-            "--intel-sw-improvement-program-consent",
-            "decline",
             "-p=NEED_VS2019_INTEGRATION=0",
             "-p=NEED_VS2022_INTEGRATION=0",
         ]);

@@ -128,8 +128,6 @@ export async function installWin32(
       "--silent",
       "--eula",
       "accept",
-      "--intel-sw-improvement-program-consent",
-      "decline",
       "-p=NEED_VS2019_INTEGRATION=0",
       "-p=NEED_VS2022_INTEGRATION=0",
     ]);
