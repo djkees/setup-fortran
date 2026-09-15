@@ -1,44 +1,43 @@
 # Spike: does mounting a trusted Windows Dev Drive (ReFS + async Defender
 # scanning) speed up the ifort HPCKit silent install on windows-2022?
-# Manual-only, not wired into the real CI matrix. Baseline vs. dev-drive
-# both install ifort 2021.9 (the slowest version we measured, ~19 min cold
-# on windows-2022) so the comparison is apples-to-apples in one run.
+# Manual-only, not wired into the real CI matrix.
+#
+# v1 of this spike ran the Intel installer directly via a hand-rolled
+# PowerShell `&` invocation and finished in ~1-2 seconds with no error and
+# no installed files - the installer clearly detaches/hands off rather than
+# blocking under a plain shell invocation, unlike the real action's
+# `exec.exec()` call (which we've confirmed blocks correctly for the real
+# ~18 min install in production). Rather than reverse-engineer that
+# difference, this version runs the *actual* action (`uses: ./`) so the
+# install goes through the exact same code path as real CI. To redirect
+# the install onto the Dev Drive without touching any TypeScript
+# (ONEAPI_ROOT is hardcoded to Program Files), we create a directory
+# junction at the install path pointing at the Dev Drive before invoking
+# the action - the installer's writes land on ReFS transparently.
 name: "Spike: dev drive ifort install timing"
 
 on:
   workflow_dispatch:
 
-env:
-  IFORT_2021_9_URL: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/2a13d966-fcc5-4a66-9fcc-50603820e0c9/w_HPCKit_p_2023.1.0.46357_offline.exe"
-
 jobs:
   baseline:
     runs-on: windows-2022
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
-      - name: Download ifort 2021.9 installer
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri $env:IFORT_2021_9_URL -OutFile "$env:RUNNER_TEMP\ifort-2021.9.exe" -UserAgent "Mozilla/5.0"
-          $fileSize = (Get-Item "$env:RUNNER_TEMP\ifort-2021.9.exe").Length
-          "Downloaded file size: $fileSize bytes" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+      - uses: actions/checkout@v7
 
-      - name: Time silent install (default Program Files location)
-        shell: pwsh
-        run: |
-          $sw = [Diagnostics.Stopwatch]::StartNew()
-          & "$env:RUNNER_TEMP\ifort-2021.9.exe" -s -a --silent --eula accept `
-            -p=NEED_VS2019_INTEGRATION=0 -p=NEED_VS2022_INTEGRATION=0
-          $exitCode = $LASTEXITCODE
-          $sw.Stop()
-          $seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-          $installed = Test-Path "C:\Program Files (x86)\Intel\oneAPI\setvars.bat"
-          "BASELINE install time: $seconds seconds, exit code: $exitCode, setvars.bat present: $installed" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+      - name: Install ifort 2021.9 (default Program Files location)
+        uses: ./
+        with:
+          compiler: ifort
+          version: "2021.9"
 
   dev-drive:
     runs-on: windows-2022
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
+      - uses: actions/checkout@v7
+
       - name: Mount trusted Dev Drive
         uses: samypr100/setup-dev-drive@v4
         with:
@@ -47,23 +46,16 @@ jobs:
           mount-path: dev_drive
           trusted-dev-drive: true
 
-      - name: Download ifort 2021.9 installer
+      - name: Redirect oneAPI install path onto the Dev Drive
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri $env:IFORT_2021_9_URL -OutFile "$env:RUNNER_TEMP\ifort-2021.9.exe" -UserAgent "Mozilla/5.0"
-          $fileSize = (Get-Item "$env:RUNNER_TEMP\ifort-2021.9.exe").Length
-          "Downloaded file size: $fileSize bytes" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          $target = Join-Path $env:DEV_DRIVE "oneAPI"
+          New-Item -ItemType Directory -Path $target -Force | Out-Null
+          New-Item -ItemType Directory -Path "C:\Program Files (x86)\Intel" -Force | Out-Null
+          cmd /c mklink /J "C:\Program Files (x86)\Intel\oneAPI" "$target"
 
-      - name: Time silent install (installed onto Dev Drive)
-        shell: pwsh
-        run: |
-          $installDir = Join-Path $env:DEV_DRIVE "oneAPI"
-          $sw = [Diagnostics.Stopwatch]::StartNew()
-          & "$env:RUNNER_TEMP\ifort-2021.9.exe" -s -a --silent --eula accept `
-            --install-dir "$installDir" `
-            -p=NEED_VS2019_INTEGRATION=0 -p=NEED_VS2022_INTEGRATION=0
-          $exitCode = $LASTEXITCODE
-          $sw.Stop()
-          $seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-          $installed = Test-Path (Join-Path $installDir "setvars.bat")
-          "DEV DRIVE install time: $seconds seconds, exit code: $exitCode, setvars.bat present: $installed (installed to $installDir)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+      - name: Install ifort 2021.9 (onto Dev Drive via junction)
+        uses: ./
+        with:
+          compiler: ifort
+          version: "2021.9"
