@@ -2,18 +2,18 @@
 # scanning) speed up the ifort HPCKit silent install on windows-2022?
 # Manual-only, not wired into the real CI matrix.
 #
-# v1 of this spike ran the Intel installer directly via a hand-rolled
-# PowerShell `&` invocation and finished in ~1-2 seconds with no error and
-# no installed files - the installer clearly detaches/hands off rather than
-# blocking under a plain shell invocation, unlike the real action's
-# `exec.exec()` call (which we've confirmed blocks correctly for the real
-# ~18 min install in production). Rather than reverse-engineer that
-# difference, this version runs the *actual* action (`uses: ./`) so the
-# install goes through the exact same code path as real CI. To redirect
-# the install onto the Dev Drive without touching any TypeScript
-# (ONEAPI_ROOT is hardcoded to Program Files), we create a directory
-# junction at the install path pointing at the Dev Drive before invoking
-# the action - the installer's writes land on ReFS transparently.
+# v1 ran the Intel installer directly via a hand-rolled PowerShell `&`
+# invocation and finished in ~1-2s with nothing installed - the installer
+# detaches under a plain shell call, unlike the real action's exec.exec()
+# (confirmed to block correctly for the real ~18 min install in
+# production). v2 switched to running the actual action (`uses: ./`) and
+# redirected just the final install directory (ONEAPI_ROOT is hardcoded to
+# Program Files) onto the Dev Drive via a junction - result: only ~6%
+# faster (17m17s vs 16m16s), both still solidly in the "slow" bucket. That
+# suggests the installer's heavy I/O happens during extraction/staging in
+# %TEMP%, not at the final install path. This version (v3) additionally
+# redirects TEMP/TMP onto the Dev Drive for the dev-drive job, to test
+# that directly.
 name: "Spike: dev drive ifort install timing"
 
 on:
@@ -46,13 +46,18 @@ jobs:
           mount-path: dev_drive
           trusted-dev-drive: true
 
-      - name: Redirect oneAPI install path onto the Dev Drive
+      - name: Redirect oneAPI install path and TEMP/TMP onto the Dev Drive
         shell: pwsh
         run: |
           $target = Join-Path $env:DEV_DRIVE "oneAPI"
           New-Item -ItemType Directory -Path $target -Force | Out-Null
           New-Item -ItemType Directory -Path "C:\Program Files (x86)\Intel" -Force | Out-Null
           cmd /c mklink /J "C:\Program Files (x86)\Intel\oneAPI" "$target"
+
+          $tempDir = Join-Path $env:DEV_DRIVE "temp"
+          New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+          "TEMP=$tempDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TMP=$tempDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Install ifort 2021.9 (onto Dev Drive via junction)
         uses: ./
