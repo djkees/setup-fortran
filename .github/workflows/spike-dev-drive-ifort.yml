@@ -19,7 +19,9 @@ jobs:
       - name: Download ifort 2021.9 installer
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri $env:IFORT_2021_9_URL -OutFile "$env:RUNNER_TEMP\ifort-2021.9.exe"
+          Invoke-WebRequest -Uri $env:IFORT_2021_9_URL -OutFile "$env:RUNNER_TEMP\ifort-2021.9.exe" -UserAgent "Mozilla/5.0"
+          $fileSize = (Get-Item "$env:RUNNER_TEMP\ifort-2021.9.exe").Length
+          "Downloaded file size: $fileSize bytes" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
 
       - name: Time silent install (default Program Files location)
         shell: pwsh
@@ -27,9 +29,11 @@ jobs:
           $sw = [Diagnostics.Stopwatch]::StartNew()
           & "$env:RUNNER_TEMP\ifort-2021.9.exe" -s -a --silent --eula accept `
             -p=NEED_VS2019_INTEGRATION=0 -p=NEED_VS2022_INTEGRATION=0
+          $exitCode = $LASTEXITCODE
           $sw.Stop()
           $seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-          "BASELINE install time: $seconds seconds" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          $installed = Test-Path "C:\Program Files (x86)\Intel\oneAPI\setvars.bat"
+          "BASELINE install time: $seconds seconds, exit code: $exitCode, setvars.bat present: $installed" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
 
   dev-drive:
     runs-on: windows-2022
@@ -46,7 +50,9 @@ jobs:
       - name: Download ifort 2021.9 installer
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri $env:IFORT_2021_9_URL -OutFile "$env:RUNNER_TEMP\ifort-2021.9.exe"
+          Invoke-WebRequest -Uri $env:IFORT_2021_9_URL -OutFile "$env:RUNNER_TEMP\ifort-2021.9.exe" -UserAgent "Mozilla/5.0"
+          $fileSize = (Get-Item "$env:RUNNER_TEMP\ifort-2021.9.exe").Length
+          "Downloaded file size: $fileSize bytes" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
 
       - name: Time silent install (installed onto Dev Drive)
         shell: pwsh
@@ -56,6 +62,8 @@ jobs:
           & "$env:RUNNER_TEMP\ifort-2021.9.exe" -s -a --silent --eula accept `
             --install-dir "$installDir" `
             -p=NEED_VS2019_INTEGRATION=0 -p=NEED_VS2022_INTEGRATION=0
+          $exitCode = $LASTEXITCODE
           $sw.Stop()
           $seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-          "DEV DRIVE install time: $seconds seconds (installed to $installDir)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          $installed = Test-Path (Join-Path $installDir "setvars.bat")
+          "DEV DRIVE install time: $seconds seconds, exit code: $exitCode, setvars.bat present: $installed (installed to $installDir)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
