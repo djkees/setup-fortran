@@ -11,9 +11,13 @@
 # Program Files) onto the Dev Drive via a junction - result: only ~6%
 # faster (17m17s vs 16m16s), both still solidly in the "slow" bucket. That
 # suggests the installer's heavy I/O happens during extraction/staging in
-# %TEMP%, not at the final install path. This version (v3) additionally
-# redirects TEMP/TMP onto the Dev Drive for the dev-drive job, to test
-# that directly.
+# %TEMP%, not at the final install path. This version (v4) additionally
+# redirects TEMP/TMP onto the Dev Drive for the dev-drive job (testing
+# that directly), and - rather than keep guessing from wall-clock timing -
+# captures Intel's own installer logs (default location is <install-dir>\
+# logs, so it's already covered by the ONEAPI_ROOT junction on the
+# dev-drive job) as workflow artifacts, so we can read the actual
+# per-phase breakdown instead of inferring it.
 name: "Spike: dev drive ifort install timing"
 
 on:
@@ -31,6 +35,14 @@ jobs:
         with:
           compiler: ifort
           version: "2021.9"
+
+      - name: Upload install logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-install-logs
+          path: C:\Program Files (x86)\Intel\oneAPI\logs
+          if-no-files-found: warn
 
   dev-drive:
     runs-on: windows-2022
@@ -64,3 +76,11 @@ jobs:
         with:
           compiler: ifort
           version: "2021.9"
+
+      - name: Upload install logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-drive-install-logs
+          path: C:\Program Files (x86)\Intel\oneAPI\logs
+          if-no-files-found: warn
