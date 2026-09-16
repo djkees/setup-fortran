@@ -3,8 +3,8 @@ import * as exec from "@actions/exec";
 import * as cache from "@actions/cache";
 import * as tc from "@actions/tool-cache";
 import * as fs from "fs";
-import { lookup } from "node:dns/promises";
 import { installDarwin } from "../../../src/installers/ifort/darwin";
+import { verifySha256 } from "../../../src/verify_download";
 import { Arch, Compiler, OS, Msystem, type Inputs } from "../../../src/types";
 
 jest.mock("@actions/core");
@@ -12,9 +12,6 @@ jest.mock("@actions/exec");
 jest.mock("@actions/cache");
 jest.mock("@actions/tool-cache");
 jest.mock("../../../src/verify_download");
-jest.mock("node:dns/promises", () => ({
-  lookup: jest.fn(),
-}));
 jest.mock("fs", () => ({
   ...jest.requireActual("fs"),
   existsSync: jest.fn(),
@@ -26,7 +23,9 @@ describe("installDarwin (ifort)", () => {
   const mockedCache = cache as jest.Mocked<typeof cache>;
   const mockedTc = tc as jest.Mocked<typeof tc>;
   const mockedFs = fs as jest.Mocked<typeof fs>;
-  const mockedLookup = lookup as jest.MockedFunction<typeof lookup>;
+  const mockedVerifySha256 = verifySha256 as jest.MockedFunction<
+    typeof verifySha256
+  >;
   const mockedExportVariable = core.exportVariable as jest.MockedFunction<
     typeof core.exportVariable
   >;
@@ -44,7 +43,6 @@ describe("installDarwin (ifort)", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    mockedLookup.mockResolvedValue({ address: "93.184.216.34", family: 4 });
     // installDarwin appends -arch flags to these and mutates process.env
     for (const name of ["CFLAGS", "CXXFLAGS", "LDFLAGS"]) {
       delete process.env[name];
@@ -109,6 +107,48 @@ describe("installDarwin (ifort)", () => {
     expect(mockedCache.saveCache).toHaveBeenCalled();
   });
 
+  it("verifies the downloaded DMG's checksum before mounting it", async () => {
+    mockedCache.restoreCache.mockResolvedValue(undefined);
+    mockedTc.downloadTool.mockResolvedValue("/tmp/ifort.dmg");
+
+    await installDarwin(baseInputs);
+
+    expect(mockedVerifySha256).toHaveBeenCalledWith(
+      "/tmp/ifort.dmg",
+      "a17790161712632605f50c37fc8462112ec9947993f9124d0aad53bc055d8fb2",
+    );
+    const verifyOrder = mockedVerifySha256.mock.invocationCallOrder[0];
+    const hdiutilVerifyCall = mockedExec.mock.calls.findIndex(
+      ([commandLine, args]) =>
+        commandLine === "hdiutil" && args?.[0] === "verify",
+    );
+    expect(
+      mockedExec.mock.invocationCallOrder[hdiutilVerifyCall],
+    ).toBeGreaterThan(verifyOrder);
+  });
+
+  it("does not verify or mount the DMG when its checksum is rejected", async () => {
+    mockedCache.restoreCache.mockResolvedValue(undefined);
+    mockedTc.downloadTool.mockResolvedValue("/tmp/ifort.dmg");
+    mockedVerifySha256.mockRejectedValueOnce(
+      new Error("SHA-256 verification failed for /tmp/ifort.dmg."),
+    );
+
+    await expect(installDarwin(baseInputs)).rejects.toThrow(
+      /SHA-256 verification failed/,
+    );
+
+    expect(mockedExec).not.toHaveBeenCalledWith(
+      "hdiutil",
+      expect.arrayContaining(["verify"]),
+    );
+    expect(mockedExec).not.toHaveBeenCalledWith(
+      "hdiutil",
+      expect.arrayContaining(["attach"]),
+    );
+    expect(mockedCache.saveCache).not.toHaveBeenCalled();
+  });
+
   it("retries a transient bootstrapper failure", async () => {
     mockedCache.restoreCache.mockResolvedValue(undefined);
     mockedTc.downloadTool.mockResolvedValue("/tmp/ifort.dmg");
@@ -153,54 +193,6 @@ describe("installDarwin (ifort)", () => {
 
     expect(installerAttempts).toBe(2);
     expect(mockedCache.saveCache).toHaveBeenCalled();
-  });
-
-  it("waits for DNS to recover before downloading", async () => {
-    mockedCache.restoreCache.mockResolvedValue(undefined);
-    mockedTc.downloadTool.mockResolvedValue("/tmp/ifort.dmg");
-    mockedLookup
-      .mockRejectedValueOnce(new Error("getaddrinfo ENOTFOUND"))
-      .mockResolvedValue({ address: "93.184.216.34", family: 4 });
-    const timeoutSpy = jest
-      .spyOn(global, "setTimeout")
-      .mockImplementation((callback: Parameters<typeof setTimeout>[0]) => {
-        callback();
-        return 0 as unknown as NodeJS.Timeout;
-      });
-
-    try {
-      await installDarwin(baseInputs);
-    } finally {
-      timeoutSpy.mockRestore();
-    }
-
-    expect(mockedLookup).toHaveBeenCalledWith(
-      "registrationcenter-download.intel.com",
-    );
-    expect(mockedTc.downloadTool).toHaveBeenCalled();
-    expect(mockedCache.saveCache).toHaveBeenCalled();
-  });
-
-  it("fails when DNS stays unreachable", async () => {
-    mockedCache.restoreCache.mockResolvedValue(undefined);
-    mockedLookup.mockRejectedValue(new Error("getaddrinfo ENOTFOUND"));
-    const timeoutSpy = jest
-      .spyOn(global, "setTimeout")
-      .mockImplementation((callback: Parameters<typeof setTimeout>[0]) => {
-        callback();
-        return 0 as unknown as NodeJS.Timeout;
-      });
-
-    try {
-      await expect(installDarwin(baseInputs)).rejects.toThrow(
-        /Could not resolve registrationcenter-download\.intel\.com after 25 attempts/,
-      );
-    } finally {
-      timeoutSpy.mockRestore();
-    }
-
-    expect(mockedLookup).toHaveBeenCalledTimes(25);
-    expect(mockedTc.downloadTool).not.toHaveBeenCalled();
   });
 
   it("installs on ARM64 under Rosetta 2", async () => {

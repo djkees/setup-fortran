@@ -112,7 +112,7 @@ export async function installWin32(
   } else {
     if (cacheHit) fs.rmSync(ONEAPI_ROOT, { recursive: true, force: true });
     core.info(`Downloading ifort installer...`);
-    const installerPath = await tc.downloadTool(
+    const installerPath = await downloadToolWithRetry(
       release.url,
       path.win32.join(
         process.env.RUNNER_TEMP ?? "C:\\Temp",
@@ -181,9 +181,21 @@ export async function installWin32(
         // Keep the filter to remove Git's link.exe to prevent "extra operand" errors.
         // Since vcvars64.bat already prepended MSVC's link.exe to the PATH,
         // we no longer need the secondary TypeScript vswhere lookup.
+        // Dedupe entries (case-insensitive, first occurrence wins) before the
+        // full-overwrite export, so a redundant downstream
+        // setvars.bat/vcvarsall.bat call re-prepending an already-set PATH
+        // doesn't blow past cmd.exe's line-length limit (fortran-lang/setup-fortran#250).
+        const seenPathEntries = new Set<string>();
         const filteredPath = val
           .split(";")
           .filter((p) => !p.toLowerCase().includes("git\\usr\\bin"))
+          .filter((p) => {
+            if (p === "") return false;
+            const key = p.toLowerCase();
+            if (seenPathEntries.has(key)) return false;
+            seenPathEntries.add(key);
+            return true;
+          })
           .join(";");
         core.exportVariable("PATH", filteredPath);
         addMsvcBinFromPath(filteredPath);
@@ -207,6 +219,39 @@ export async function installWin32(
     cxx: "cl",
   };
   return result;
+}
+
+// tc.downloadTool's built-in retries are seconds apart; a CDN wobble lasting
+// minutes needs an outer loop. Mirrors src/installers/ifx/win32.ts.
+async function downloadToolWithRetry(
+  url: string,
+  destination: string,
+  maxAttempts = 3,
+): Promise<string> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await tc.downloadTool(url, destination);
+    } catch (error) {
+      lastError = error;
+
+      fs.rmSync(destination, { force: true });
+
+      if (attempt === maxAttempts) break;
+
+      const delaySeconds = attempt * 20;
+
+      core.info(
+        `Download failed (attempt ${attempt.toString()}/${maxAttempts.toString()}), ` +
+          `retrying in ${delaySeconds.toString()}s: ${String(error)}`,
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, delaySeconds * 1000));
+    }
+  }
+
+  throw lastError;
 }
 
 async function resolveInstalledVersion(): Promise<string> {

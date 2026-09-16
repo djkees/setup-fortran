@@ -9,6 +9,24 @@ import { Arch, type InstallationResult } from "../../types";
 import { resolveVersion } from "../../resolve_version";
 import type { Inputs } from "../../types";
 
+// Matches the timeout options every other Debian-based installer sets on its
+// apt-get calls (e.g. gfortran/debian.ts's APT_TIMEOUT_OPTS): fail fast on a
+// hung mirror instead of relying on apt's own (much longer) defaults, and
+// disable apt's built-in retry (Acquire::Retries=0) since the TS-level retry
+// loop below already retries the whole command with backoff.
+const APT_TIMEOUT_OPTS = [
+  "-o",
+  "Acquire::http::Timeout=30",
+  "-o",
+  "Acquire::http::ConnectTimeout=20",
+  "-o",
+  "Acquire::https::Timeout=30",
+  "-o",
+  "Acquire::https::ConnectTimeout=20",
+  "-o",
+  "Acquire::Retries=0",
+] as const;
+
 const AOCC_RELEASES = [
   {
     version: "5.2",
@@ -86,10 +104,7 @@ export async function installDebian(
     const debPath = path.posix.join(os.tmpdir(), metadata.deb);
 
     core.info(`Downloading AOCC ${version} from ${metadata.url}...`);
-    // Use tool-cache for resilient HTTP downloading with headers and retries
-    await tc.downloadTool(metadata.url, debPath, undefined, {
-      "User-Agent": "Mozilla/5.0",
-    });
+    await downloadToolWithRetry(metadata.url, debPath);
 
     core.info(`Verifying checksum...`);
     await exec.exec("bash", [
@@ -99,7 +114,7 @@ export async function installDebian(
 
     core.info(`Installing AOCC ${version}...`);
     await exec.exec("sudo", ["dpkg", "-i", debPath]);
-    await exec.exec("sudo", ["apt-get", "install", "-f", "-y"]);
+    await aptGetFixInstallWithRetry();
 
     core.info(`Saving AOCC ${version} to cache...`);
     await exec.exec("sudo", ["mkdir", "-p", tempInstallDir]);
@@ -153,6 +168,70 @@ export async function installDebian(
     cxx: "clang++",
   };
   return result;
+}
+
+// dpkg -i commonly leaves AOCC's declared dependencies unconfigured; this
+// fixup step fetches them over apt, so it is exposed to the same transient
+// mirror/network failures as any other apt-get call and needs the same
+// retry-with-backoff handling.
+async function aptGetFixInstallWithRetry(maxAttempts = 3): Promise<void> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await exec.exec("sudo", [
+        "timeout",
+        "--signal=TERM",
+        "--kill-after=30s",
+        "15m",
+        "apt-get",
+        "install",
+        "-f",
+        "-y",
+        ...APT_TIMEOUT_OPTS,
+      ]);
+      return;
+    } catch (err) {
+      if (attempt === maxAttempts) throw err;
+      core.info(
+        `apt-get install -f failed (attempt ${attempt.toString()}/${maxAttempts.toString()}), retrying in ${(attempt * 10).toString()}s...`,
+      );
+      await new Promise((res) => setTimeout(res, attempt * 10_000));
+    }
+  }
+}
+
+// tc.downloadTool's built-in retries are seconds apart; a CDN wobble lasting
+// minutes needs an outer loop. Mirrors src/installers/ifx/win32.ts.
+async function downloadToolWithRetry(
+  url: string,
+  destination: string,
+  maxAttempts = 3,
+): Promise<string> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await tc.downloadTool(url, destination, undefined, {
+        "User-Agent": "Mozilla/5.0",
+      });
+    } catch (error) {
+      lastError = error;
+
+      fs.rmSync(destination, { force: true });
+
+      if (attempt === maxAttempts) break;
+
+      const delaySeconds = attempt * 20;
+
+      core.info(
+        `Download failed (attempt ${attempt.toString()}/${maxAttempts.toString()}), ` +
+          `retrying in ${delaySeconds.toString()}s: ${String(error)}`,
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, delaySeconds * 1000));
+    }
+  }
+
+  throw lastError;
 }
 
 async function resolveInstalledVersion(binDir: string): Promise<string> {

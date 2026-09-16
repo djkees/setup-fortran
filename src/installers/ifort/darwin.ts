@@ -2,7 +2,6 @@ import * as core from "@actions/core";
 import * as exec from "@actions/exec";
 import * as cache from "@actions/cache";
 import * as tc from "@actions/tool-cache";
-import { lookup } from "node:dns/promises";
 import { Arch, type InstallationResult, type Inputs } from "../../types";
 import { resolveVersion } from "../../resolve_version";
 import * as fs from "fs";
@@ -11,44 +10,56 @@ import {
   saveCompilerCache,
   validateRestoredCompilerCache,
 } from "../../cache_validation";
+import { verifySha256 } from "../../verify_download";
 
 // Intel dropped ifort support starting with the 2024 oneAPI release.
 // NOTE: Intel's macOS download GUIDs change frequently. These are the standard
 // known releases, but if you hit a 403, the GUID in the URL needs updating.
+// sha256 is of the downloaded DMG itself (computed locally, not published by
+// Intel) — it guards against a corrupted or tampered download, not against a
+// GUID rotation upstream.
 //
 // Mapping: https://www.intel.com/content/www/us/en/developer/articles/tool/compilers-redistributable-libraries-by-version.html
 const IFORT_RELEASES = [
   {
     version: "2021.10",
     url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/edb4dc2f-266f-47f2-8d56-21bc7764e119/m_HPCKit_p_2023.2.0.49443_offline.dmg",
+    sha256: "a17790161712632605f50c37fc8462112ec9947993f9124d0aad53bc055d8fb2",
   },
   {
     version: "2021.9",
     url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/a99cb1c5-5af6-4824-9811-ae172d24e594/m_HPCKit_p_2023.1.0.44543_offline.dmg",
+    sha256: "57fb765918f0ffa04061e371220a6af5ba137a164c845882d57532a949a54e30",
   },
   {
     version: "2021.8",
     url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/19086/m_HPCKit_p_2023.0.0.25440_offline.dmg",
+    sha256: "471883e466ca5df2a6a2eb12487d8d8430e3f217aeb4491a77caba7983d18a21",
   },
   {
     version: "2021.6",
     url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/18681/m_HPCKit_p_2022.2.0.158_offline.dmg",
+    sha256: "da7a4ad396543a144e3db17935d8d307a18e571d4a5992ebdb5d3948d1f4ed8a",
   },
   {
     version: "2021.5",
     url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/18341/m_HPCKit_p_2022.1.0.86_offline.dmg",
+    sha256: "c215cc7be7530fe0a60f4bda43923226d41f88a296134852252076a740a205c0",
   },
   {
     version: "2021.3",
     url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/17890/m_HPCKit_p_2021.3.0.3226_offline.dmg",
+    sha256: "e9d1f0720551326c57e5277a7761689b919107d8ec82e500328fb92d87ffa811",
   },
   {
     version: "2021.2",
     url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/17643/m_HPCKit_p_2021.2.0.2903_offline.dmg",
+    sha256: "496be1ac1d60d2563831532c2e02aded9d6418b40ea297657d4348a9486a7d55",
   },
   {
     version: "2021.1",
     url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/17398/m_HPCKit_p_2021.1.0.2681_offline.dmg",
+    sha256: "8f0e59f04e0549cc64c2d06b02e63e907e1914ab89a02fddcc6aa70c4a17cd27",
   },
 ] as const;
 
@@ -60,39 +71,10 @@ export const SUPPORTED_VERSIONS = {
 const ONEAPI_ROOT = "/opt/intel/oneapi";
 const SETVARS_SH = `${ONEAPI_ROOT}/setvars.sh`;
 
-async function waitForDnsResolution(
-  url: string,
-  maxAttempts = 25,
-  delayMs = 15_000,
-): Promise<void> {
-  const host = new URL(url).hostname;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      await lookup(host);
-      return;
-    } catch {
-      if (attempt === maxAttempts) {
-        throw new Error(
-          `Could not resolve ${host} after ${maxAttempts.toString()} attempts.`,
-        );
-      }
-      core.info(
-        `Could not resolve ${host} (attempt ${attempt.toString()}/${maxAttempts.toString()}), retrying in ${(delayMs / 1000).toString()}s...`,
-      );
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-    }
-  }
-}
-
 async function downloadInstaller(
   url: string,
   destPath: string,
 ): Promise<string> {
-  // Runner DNS can blip (ENOTFOUND) while the endpoint itself is healthy, and
-  // the retry loops below burn through in about a minute. Wait for the
-  // download host to resolve first so a short blip does not fail the install.
-  await waitForDnsResolution(url);
-
   const maxTcAttempts = 3;
 
   for (let attempt = 1; attempt <= maxTcAttempts; attempt++) {
@@ -247,6 +229,8 @@ export async function installDarwin(
     );
 
     const dmgPath = await downloadInstaller(release.url, targetPath);
+    core.info("Verifying checksum...");
+    await verifySha256(dmgPath, release.sha256);
     core.info("Verifying the downloaded DMG integrity...");
     await exec.exec("hdiutil", ["verify", dmgPath]);
 
