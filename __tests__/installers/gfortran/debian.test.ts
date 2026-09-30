@@ -260,6 +260,150 @@ describe("GFortran Debian Installer", () => {
       );
     });
 
+    it("retries apt-get update when the toolchain PPA fails even on cache hit", async () => {
+      // Regression test for https://github.com/fortran-lang/setup-fortran/pull/245#issuecomment-5761437288:
+      // a transient 503 from ppa.launchpadcontent.net left the package index
+      // without gcc-16, and the old code skipped the update retry because of
+      // the cache hit, so both the cached (--no-download) and online installs
+      // failed with "Unable to locate package".
+      mockedCache.restoreCache.mockResolvedValue("hit");
+      const timeoutSpy = jest
+        .spyOn(global, "setTimeout")
+        .mockImplementation((callback) => {
+          if (typeof callback === "function") callback();
+          return 0 as unknown as NodeJS.Timeout;
+        });
+
+      let updateAttempts = 0;
+      mockedExec.mockImplementation(async (commandLine, args, options) => {
+        if (commandLine === "gfortran" && args?.[0] === "--version") {
+          options?.listeners?.stdout?.(
+            Buffer.from("GNU Fortran (Ubuntu) 16.0.0"),
+          );
+        }
+        if (
+          commandLine === "sudo" &&
+          args?.includes("apt-get") &&
+          args?.includes("update")
+        ) {
+          updateAttempts++;
+          if (updateAttempts === 1) {
+            options?.listeners?.stderr?.(
+              Buffer.from(
+                "W: Failed to fetch https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu/dists/noble/main/binary-amd64/Packages  503  Service Unavailable\n",
+              ),
+            );
+            return 100;
+          }
+        }
+        return 0;
+      });
+
+      try {
+        const inputs = { ...baseInputs, version: "16", osVersion: "24.04" };
+        const result = await installDebian(inputs);
+
+        expect(updateAttempts).toBe(2); // failed once, succeeded on retry
+        expect(core.info).toHaveBeenCalledWith(
+          expect.stringContaining("apt-get update failed (attempt 1/3)"),
+        );
+        // The refreshed index lets the cached .debs resolve.
+        expect(mockedExec).toHaveBeenCalledWith("sudo", [
+          "apt-get",
+          "install",
+          "-y",
+          "--no-download",
+          "-o",
+          expect.stringContaining("Dir::Cache::archives="),
+          "gcc-16",
+          "g++-16",
+          "gfortran-16",
+        ]);
+        expect(result.fc).toBe("gfortran-16");
+      } finally {
+        timeoutSpy.mockRestore();
+      }
+    });
+
+    it("retries update when the PPA warning occurs despite exit code 0", async () => {
+      const timeoutSpy = jest
+        .spyOn(global, "setTimeout")
+        .mockImplementation((callback) => {
+          if (typeof callback === "function") callback();
+          return 0 as unknown as NodeJS.Timeout;
+        });
+
+      let updateAttempts = 0;
+      mockedExec.mockImplementation(async (commandLine, args, options) => {
+        if (commandLine === "gfortran" && args?.[0] === "--version") {
+          options?.listeners?.stdout?.(
+            Buffer.from("GNU Fortran (Ubuntu) 16.0.0"),
+          );
+        }
+        if (
+          commandLine === "sudo" &&
+          args?.includes("apt-get") &&
+          args?.includes("update")
+        ) {
+          updateAttempts++;
+          if (updateAttempts === 1) {
+            options?.listeners?.stderr?.(
+              Buffer.from(
+                "W: Failed to fetch https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu/dists/noble/InRelease  503  Service Unavailable\n",
+              ),
+            );
+            return 0;
+          }
+        }
+        return 0;
+      });
+
+      try {
+        const inputs = { ...baseInputs, version: "16", osVersion: "24.04" };
+        const result = await installDebian(inputs);
+
+        expect(updateAttempts).toBe(2);
+        expect(core.info).toHaveBeenCalledWith(
+          expect.stringContaining("apt-get update failed (attempt 1/3)"),
+        );
+        expect(result.fc).toBe("gfortran-16");
+      } finally {
+        timeoutSpy.mockRestore();
+      }
+    });
+
+    it("does not retry a warning-only failure in an unrelated repository", async () => {
+      let updateAttempts = 0;
+      mockedExec.mockImplementation(async (commandLine, args, options) => {
+        if (commandLine === "gfortran" && args?.[0] === "--version") {
+          options?.listeners?.stdout?.(
+            Buffer.from("GNU Fortran (Ubuntu) 14.2.0"),
+          );
+        }
+        if (
+          commandLine === "sudo" &&
+          args?.includes("apt-get") &&
+          args?.includes("update")
+        ) {
+          updateAttempts++;
+          options?.listeners?.stderr?.(
+            Buffer.from(
+              "W: Failed to fetch https://packages.microsoft.com/ubuntu/24.04/prod/dists/noble/InRelease  403  Forbidden\n",
+            ),
+          );
+          return 0;
+        }
+        return 0;
+      });
+
+      await installDebian(baseInputs);
+
+      expect(updateAttempts).toBe(1);
+      expect(core.info).not.toHaveBeenCalledWith(
+        expect.stringContaining("apt-get update failed"),
+      );
+    });
+
     it("separates x64 and ARM64 caches", async () => {
       await installDebian({ ...baseInputs, arch: Arch.ARM64 });
 

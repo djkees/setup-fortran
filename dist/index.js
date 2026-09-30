@@ -96319,7 +96319,7 @@ function isVersionListDescending(versions) {
 }
 // FIX: Added multi-page fallback strategy to guarantee legacy version visibility
 async function resolveLatestPatch(repo, major, tagPrefix = `llvmorg-${major}.`, tagStripper = (tag) => tag.replace("llvmorg-", "")) {
-    info(`Resolving latest patch version for ${repo} major ${major} via GitHub API...`);
+    core.info(`Resolving latest patch version for ${repo} major ${major} via GitHub API...`);
     // Walk up to 3 pagination indexes to unearth deep historical patches
     for (let page = 1; page <= 3; page++) {
         const url = `https://api.github.com/repos/${repo}/releases?per_page=100&page=${page.toString()}`;
@@ -96337,6 +96337,87 @@ async function resolveLatestPatch(repo, major, tagPrefix = `llvmorg-${major}.`, 
         }
     }
     throw new Error(`No stable release found for ${repo} major ${major} within visible historical GitHub releases.`);
+}
+/**
+ * Resolves the newest stable patch of `major` that actually ships the
+ * required installer asset, along with its SHA-256 digest.
+ *
+ * `resolveLatestPatch` picks the newest tag blindly, which breaks when
+ * upstream stops publishing an asset for a newer patch (e.g. LLVM 23.1.2
+ * ships `win64.msi` but no `woa64.msi`, while 23.1.1 ships both). The
+ * release-list endpoint already embeds each release's asset names, so the
+ * newest patch *with* the asset is picked without extra per-tag fetches.
+ * Releases without an embedded asset list fall back to a `verifyAssetExists`
+ * probe (whose digest is reused, so the caller never re-verifies).
+ * Explicit user-pinned patches bypass this helper and keep failing
+ * loudly via `verifyAssetExists`.
+ */
+async function resolveLatestPatchWithAsset(repo, major, filenameForPatch, tagPrefix = `llvmorg-${major}.`, tagStripper = (tag) => tag.replace("llvmorg-", ""), tagFromPatch = (p) => `llvmorg-${p}`) {
+    info(`Resolving latest patch version for ${repo} major ${major} with required asset via GitHub API...`);
+    // Collect stable candidates newest-first across pages; decide locally when
+    // the list response embeds assets, probe per-tag otherwise. A partial page
+    // (< per_page) is the last page: stop listing and probe what we have.
+    const unknownAssetCandidates = [];
+    const tried = [];
+    for (let page = 1; page <= 3; page++) {
+        const url = `https://api.github.com/repos/${repo}/releases?per_page=100&page=${page.toString()}`;
+        const { data: releases } = await fetchJsonWithRetry(url, {
+            headers: githubHeaders(),
+        });
+        if (!releases || releases.length === 0) {
+            break;
+        }
+        for (const release of releases) {
+            if (!release.tag_name.startsWith(tagPrefix) ||
+                release.prerelease ||
+                release.tag_name.includes("rc")) {
+                continue;
+            }
+            const patch = tagStripper(release.tag_name);
+            tried.push(patch);
+            if (release.assets !== undefined) {
+                const filename = filenameForPatch(patch);
+                if (release.assets.some((a) => a.name === filename)) {
+                    // Drain any earlier unknowns that are newer: they need a probe to
+                    // prove they lack the asset before falling back to this match.
+                    const probed = await probeUnknownCandidates(repo, unknownAssetCandidates, filenameForPatch, tagFromPatch);
+                    if (probed)
+                        return probed;
+                    const digest = await verifyAssetExists(repo, patch, filename, tagFromPatch);
+                    return { patch, digest };
+                }
+                info(`Release ${release.tag_name} in ${repo} has no asset "${filename}", trying older patch...`);
+                continue;
+            }
+            unknownAssetCandidates.push(patch);
+        }
+        if (releases.length < 100)
+            break;
+    }
+    // No list-embedded match: probe the unknowns newest-first.
+    const probed = await probeUnknownCandidates(repo, unknownAssetCandidates, filenameForPatch, tagFromPatch);
+    if (probed)
+        return probed;
+    throw new Error(`No stable release found for ${repo} major ${major} with required asset. Tried: ${tried.join(", ") || "none"}.`);
+}
+async function probeUnknownCandidates(repo, candidates, filenameForPatch, tagFromPatch) {
+    for (const patch of candidates) {
+        const filename = filenameForPatch(patch);
+        try {
+            const digest = await verifyAssetExists(repo, patch, filename, tagFromPatch);
+            return { patch, digest };
+        }
+        catch (e) {
+            if (!isMissingAssetError(e))
+                throw e;
+            info(`Release ${tagFromPatch(patch)} in ${repo} has no asset "${filename}", trying older patch...`);
+        }
+    }
+    return undefined;
+}
+function isMissingAssetError(e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return (msg.includes("has no asset") || msg.includes("does not exist (no release"));
 }
 async function verifyAssetExists(repo, patch, filename, tagFromPatch = (p) => `llvmorg-${p}`) {
     const tag = tagFromPatch(patch);
@@ -96478,7 +96559,7 @@ async function installDebian(inputs) {
         info(`Adding PPA for GFortran ${version}...`);
         await addAptRepositoryWithRetry("ppa:ubuntu-toolchain-r/test");
     }
-    await aptGetUpdateWithRetry(!!cacheHit, ppaAdded);
+    await aptGetUpdateWithRetry(ppaAdded);
     if (cacheHit) {
         info(`Cache hit for ${cacheKey}, installing from cache...`);
         try {
@@ -96561,7 +96642,7 @@ async function prepareCacheForSave(cacheDir) {
         force: true,
     });
 }
-async function aptGetUpdateWithRetry(cacheHit, ppaAdded, maxAttempts = 3) {
+async function aptGetUpdateWithRetry(ppaAdded, maxAttempts = 3) {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         let output = "";
         const exitCode = await exec_exec("sudo", [
@@ -96584,14 +96665,20 @@ async function aptGetUpdateWithRetry(cacheHit, ppaAdded, maxAttempts = 3) {
                 },
             },
         });
-        if (exitCode === 0)
-            return;
         // Repositories baked into the runner image that have nothing to do with
         // the toolchain (e.g. packages.microsoft.com returning a transient 403)
         // must not fail the job. Only a fetch failure of the ubuntu-toolchain-r
-        // PPA — whose index is required to resolve the gcc packages — is fatal.
+        // PPA — whose index is required to resolve the gcc packages — is fatal
+        // and must be retried, even on a cache hit: the .deb cache alone is
+        // useless without a fresh package index (apt still needs the index to
+        // resolve package names, so --no-download would fail with
+        // "Unable to locate package"). Note apt-get update can exit 0 even
+        // when the PPA's index failed (it only logs a W: warning), so the PPA
+        // check has to happen before any early return on exit code.
         const ppaFetchFailed = ppaAdded && indexFetchFailed(output, "ppa.launchpad");
-        if (cacheHit || !ppaFetchFailed) {
+        if (exitCode === 0 && !ppaFetchFailed)
+            return;
+        if (!ppaFetchFailed) {
             info("apt-get update did not complete cleanly; continuing with cached/stale package index.");
             return;
         }
@@ -98396,9 +98483,23 @@ async function win32_installWin32(inputs) {
                 // Keep the filter to remove Git's link.exe to prevent "extra operand" errors.
                 // Since vcvars64.bat already prepended MSVC's link.exe to the PATH,
                 // we no longer need the secondary TypeScript vswhere lookup.
+                // Dedupe entries (case-insensitive, first occurrence wins) before the
+                // full-overwrite export, so a redundant downstream
+                // setvars.bat/vcvarsall.bat call re-prepending an already-set PATH
+                // doesn't blow past cmd.exe's line-length limit (fortran-lang/setup-fortran#250).
+                const seenPathEntries = new Set();
                 const filteredPath = val
                     .split(";")
                     .filter((p) => !p.toLowerCase().includes("git\\usr\\bin"))
+                    .filter((p) => {
+                    if (p === "")
+                        return false;
+                    const key = p.toLowerCase();
+                    if (seenPathEntries.has(key))
+                        return false;
+                    seenPathEntries.add(key);
+                    return true;
+                })
                     .join(";");
                 exportVariable("PATH", filteredPath);
                 addMsvcBinFromPath(filteredPath);
@@ -98753,8 +98854,117 @@ async function debian_aptGetInstallWithRetry(packages, maxAttempts = 3) {
     }
 }
 
-;// CONCATENATED MODULE: external "node:dns/promises"
-const promises_namespaceObject = require("node:dns/promises");
+;// CONCATENATED MODULE: external "dns/promises"
+const promises_namespaceObject = require("dns/promises");
+;// CONCATENATED MODULE: ./src/download_installer.ts
+
+
+
+
+// Public recursive resolvers, used only when the runner's own resolver has
+// failed. Google first: it forwards EDNS Client Subnet, so Akamai hands back
+// a geographically sensible edge rather than whatever is near the resolver.
+const FALLBACK_NAMESERVERS = ["8.8.8.8", "1.1.1.1", "9.9.9.9"];
+const CURL_BASE_ARGS = [
+    "-sS",
+    "-L",
+    "--fail",
+    // The Intel download host publishes A records only. Letting getaddrinfo ask
+    // for AAAA as well doubles the queries and lets a SERVFAIL on the (useless)
+    // AAAA leg fail the whole lookup.
+    "-4",
+    "--retry",
+    "5",
+    "--retry-delay",
+    "5",
+    // Without this, --retry ignores exit 6 (could not resolve host) and exit 7
+    // (could not connect), because curl does not classify them as transient.
+    "--retry-all-errors",
+    "--retry-max-time",
+    "300",
+    "--connect-timeout",
+    "30",
+    "--max-time",
+    "600",
+];
+/**
+ * macOS caches negative DNS answers in mDNSResponder. Node's dns.lookup() and
+ * curl's threaded resolver both call getaddrinfo(), so once a name has failed
+ * on a runner, every later attempt in that job is served the cached failure
+ * without a query leaving the machine. Flushing forces a re-query.
+ */
+async function flushDnsCache() {
+    if (process.platform !== "darwin") {
+        return;
+    }
+    await exec_exec("sudo", ["dscacheutil", "-flushcache"], {
+        ignoreReturnCode: true,
+        silent: true,
+    });
+    await exec_exec("sudo", ["killall", "-HUP", "mDNSResponder"], {
+        ignoreReturnCode: true,
+        silent: true,
+    });
+    info("Flushed the system DNS cache.");
+}
+/**
+ * Resolve `host` with c-ares (bundled in Node) talking straight to public
+ * nameservers. This never touches getaddrinfo or mDNSResponder, so it is
+ * unaffected by a poisoned system resolver.
+ */
+async function resolveWithoutSystemResolver(host) {
+    const resolver = new promises_namespaceObject.Resolver({ timeout: 5000, tries: 2 });
+    resolver.setServers([...FALLBACK_NAMESERVERS]);
+    const addresses = await resolver.resolve4(host);
+    if (addresses.length === 0) {
+        throw new Error(`No A records returned for ${host}.`);
+    }
+    return addresses;
+}
+async function downloadInstaller(url, destPath) {
+    const maxTcAttempts = 3;
+    for (let attempt = 1; attempt <= maxTcAttempts; attempt++) {
+        try {
+            info(`Downloading via tool-cache (attempt ${attempt.toString()}/${maxTcAttempts.toString()})...`);
+            return await downloadTool(url, destPath);
+        }
+        catch (error) {
+            info(`tc.downloadTool failed (attempt ${attempt.toString()}/${maxTcAttempts.toString()}): ${String(error)}`);
+            if (attempt < maxTcAttempts) {
+                await flushDnsCache();
+                await new Promise((resolve) => setTimeout(resolve, 3000 * attempt));
+            }
+        }
+    }
+    info("tc.downloadTool failed after all attempts. Falling back to curl...");
+    try {
+        await exec_exec("curl", [...CURL_BASE_ARGS, "-o", destPath, url]);
+        return destPath;
+    }
+    catch (error) {
+        info(`curl failed: ${String(error)}`);
+    }
+    // Last resort: assume the runner's resolver is the problem rather than the
+    // network. Resolve out of band and pin the result. --resolve keeps the
+    // original hostname for SNI, the Host header and certificate verification,
+    // so this is not the same as fetching the IP directly.
+    const { hostname, port, protocol } = new URL(url);
+    const effectivePort = port !== "" ? port : protocol === "https:" ? "443" : "80";
+    info(`Could not resolve ${hostname} through the runner's resolver; ` +
+        `retrying against public DNS.`);
+    const addresses = await resolveWithoutSystemResolver(hostname);
+    info(`Resolved ${hostname} to ${addresses.join(", ")} via public DNS.`);
+    await exec_exec("curl", [
+        ...CURL_BASE_ARGS,
+        "--resolve",
+        `${hostname}:${effectivePort}:${addresses.join(",")}`,
+        "-o",
+        destPath,
+        url,
+    ]);
+    return destPath;
+}
+
 ;// CONCATENATED MODULE: ./src/installers/ifort/darwin.ts
 
 
@@ -98769,40 +98979,51 @@ const promises_namespaceObject = require("node:dns/promises");
 // Intel dropped ifort support starting with the 2024 oneAPI release.
 // NOTE: Intel's macOS download GUIDs change frequently. These are the standard
 // known releases, but if you hit a 403, the GUID in the URL needs updating.
+// sha256 is of the downloaded DMG itself (computed locally, not published by
+// Intel) — it guards against a corrupted or tampered download, not against a
+// GUID rotation upstream.
 //
 // Mapping: https://www.intel.com/content/www/us/en/developer/articles/tool/compilers-redistributable-libraries-by-version.html
 const IFORT_RELEASES = [
     {
         version: "2021.10",
         url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/edb4dc2f-266f-47f2-8d56-21bc7764e119/m_HPCKit_p_2023.2.0.49443_offline.dmg",
+        sha256: "a17790161712632605f50c37fc8462112ec9947993f9124d0aad53bc055d8fb2",
     },
     {
         version: "2021.9",
         url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/a99cb1c5-5af6-4824-9811-ae172d24e594/m_HPCKit_p_2023.1.0.44543_offline.dmg",
+        sha256: "57fb765918f0ffa04061e371220a6af5ba137a164c845882d57532a949a54e30",
     },
     {
         version: "2021.8",
         url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/19086/m_HPCKit_p_2023.0.0.25440_offline.dmg",
+        sha256: "471883e466ca5df2a6a2eb12487d8d8430e3f217aeb4491a77caba7983d18a21",
     },
     {
         version: "2021.6",
         url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/18681/m_HPCKit_p_2022.2.0.158_offline.dmg",
+        sha256: "da7a4ad396543a144e3db17935d8d307a18e571d4a5992ebdb5d3948d1f4ed8a",
     },
     {
         version: "2021.5",
         url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/18341/m_HPCKit_p_2022.1.0.86_offline.dmg",
+        sha256: "c215cc7be7530fe0a60f4bda43923226d41f88a296134852252076a740a205c0",
     },
     {
         version: "2021.3",
         url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/17890/m_HPCKit_p_2021.3.0.3226_offline.dmg",
+        sha256: "e9d1f0720551326c57e5277a7761689b919107d8ec82e500328fb92d87ffa811",
     },
     {
         version: "2021.2",
         url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/17643/m_HPCKit_p_2021.2.0.2903_offline.dmg",
+        sha256: "496be1ac1d60d2563831532c2e02aded9d6418b40ea297657d4348a9486a7d55",
     },
     {
         version: "2021.1",
         url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/17398/m_HPCKit_p_2021.1.0.2681_offline.dmg",
+        sha256: "8f0e59f04e0549cc64c2d06b02e63e907e1914ab89a02fddcc6aa70c4a17cd27",
     },
 ];
 const ifort_darwin_SUPPORTED_VERSIONS = {
@@ -98811,59 +99032,6 @@ const ifort_darwin_SUPPORTED_VERSIONS = {
 };
 const darwin_ONEAPI_ROOT = "/opt/intel/oneapi";
 const SETVARS_SH = `${darwin_ONEAPI_ROOT}/setvars.sh`;
-async function waitForDnsResolution(url, maxAttempts = 25, delayMs = 15_000) {
-    const host = new URL(url).hostname;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        try {
-            await (0,promises_namespaceObject.lookup)(host);
-            return;
-        }
-        catch {
-            if (attempt === maxAttempts) {
-                throw new Error(`Could not resolve ${host} after ${maxAttempts.toString()} attempts.`);
-            }
-            info(`Could not resolve ${host} (attempt ${attempt.toString()}/${maxAttempts.toString()}), retrying in ${(delayMs / 1000).toString()}s...`);
-            await new Promise((resolve) => setTimeout(resolve, delayMs));
-        }
-    }
-}
-async function downloadInstaller(url, destPath) {
-    // Runner DNS can blip (ENOTFOUND) while the endpoint itself is healthy, and
-    // the retry loops below burn through in about a minute. Wait for the
-    // download host to resolve first so a short blip does not fail the install.
-    await waitForDnsResolution(url);
-    const maxTcAttempts = 3;
-    for (let attempt = 1; attempt <= maxTcAttempts; attempt++) {
-        try {
-            info(`Downloading via tool-cache (attempt ${attempt.toString()}/${maxTcAttempts.toString()})...`);
-            return await downloadTool(url, destPath);
-        }
-        catch (error) {
-            info(`tc.downloadTool failed (attempt ${attempt.toString()}/${maxTcAttempts.toString()}): ${String(error)}`);
-            if (attempt < maxTcAttempts) {
-                await new Promise((resolve) => setTimeout(resolve, 3000 * attempt));
-            }
-        }
-    }
-    info("tc.downloadTool failed after all attempts. Falling back to curl...");
-    await exec_exec("curl", [
-        "-sS",
-        "-L",
-        "--fail",
-        "--retry",
-        "5",
-        "--retry-delay",
-        "5",
-        "--connect-timeout",
-        "30",
-        "--max-time",
-        "600",
-        "-o",
-        destPath,
-        url,
-    ]);
-    return destPath;
-}
 async function ensureRosetta() {
     const probe = await exec_exec("arch", ["-x86_64", "/usr/bin/true"], {
         ignoreReturnCode: true,
@@ -98954,6 +99122,8 @@ async function darwin_installDarwin(inputs) {
         info(`Downloading ifort DMG installer...`);
         const targetPath = external_path_default().join(process.env.RUNNER_TEMP ?? "/tmp", `ifort-${version}.dmg`);
         const dmgPath = await downloadInstaller(release.url, targetPath);
+        info("Verifying checksum...");
+        await verifySha256(dmgPath, release.sha256);
         info("Verifying the downloaded DMG integrity...");
         await exec_exec("hdiutil", ["verify", dmgPath]);
         const mountPoint = "/Volumes/Intel_oneAPI_Installer";
@@ -99122,7 +99292,7 @@ async function ifort_win32_installWin32(inputs) {
         if (cacheHit)
             external_fs_namespaceObject.rmSync(win32_ONEAPI_ROOT, { recursive: true, force: true });
         info(`Downloading ifort installer...`);
-        const installerPath = await downloadTool(release.url, external_path_default().win32.join(process.env.RUNNER_TEMP ?? "C:\\Temp", `ifort-${version}.exe`));
+        const installerPath = await ifort_win32_downloadToolWithRetry(release.url, external_path_default().win32.join(process.env.RUNNER_TEMP ?? "C:\\Temp", `ifort-${version}.exe`));
         await verifyIntelAuthenticode(installerPath);
         info("Running silent install (this may take several minutes)...");
         await exec_exec(`"${installerPath}"`, [
@@ -99169,9 +99339,23 @@ async function ifort_win32_installWin32(inputs) {
                 // Keep the filter to remove Git's link.exe to prevent "extra operand" errors.
                 // Since vcvars64.bat already prepended MSVC's link.exe to the PATH,
                 // we no longer need the secondary TypeScript vswhere lookup.
+                // Dedupe entries (case-insensitive, first occurrence wins) before the
+                // full-overwrite export, so a redundant downstream
+                // setvars.bat/vcvarsall.bat call re-prepending an already-set PATH
+                // doesn't blow past cmd.exe's line-length limit (fortran-lang/setup-fortran#250).
+                const seenPathEntries = new Set();
                 const filteredPath = val
                     .split(";")
                     .filter((p) => !p.toLowerCase().includes("git\\usr\\bin"))
+                    .filter((p) => {
+                    if (p === "")
+                        return false;
+                    const key = p.toLowerCase();
+                    if (seenPathEntries.has(key))
+                        return false;
+                    seenPathEntries.add(key);
+                    return true;
+                })
                     .join(";");
                 exportVariable("PATH", filteredPath);
                 addMsvcBinFromPath(filteredPath);
@@ -99195,6 +99379,27 @@ async function ifort_win32_installWin32(inputs) {
         cxx: "cl",
     };
     return result;
+}
+// tc.downloadTool's built-in retries are seconds apart; a CDN wobble lasting
+// minutes needs an outer loop. Mirrors src/installers/ifx/win32.ts.
+async function ifort_win32_downloadToolWithRetry(url, destination, maxAttempts = 3) {
+    let lastError;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            return await downloadTool(url, destination);
+        }
+        catch (error) {
+            lastError = error;
+            external_fs_namespaceObject.rmSync(destination, { force: true });
+            if (attempt === maxAttempts)
+                break;
+            const delaySeconds = attempt * 20;
+            info(`Download failed (attempt ${attempt.toString()}/${maxAttempts.toString()}), ` +
+                `retrying in ${delaySeconds.toString()}s: ${String(error)}`);
+            await new Promise((resolve) => setTimeout(resolve, delaySeconds * 1000));
+        }
+    }
+    throw lastError;
 }
 async function ifort_win32_resolveInstalledVersion() {
     let output = "";
@@ -99258,6 +99463,7 @@ const APT_NETWORK_OPTIONS = [
 const NVHPC_SOURCE_LIST_FILE = "nvhpc.list";
 const nvfortran_debian_SUPPORTED_VERSIONS = {
     [Arch.X64]: [
+        "26.9",
         "26.5",
         "26.3",
         "26.1",
@@ -99298,6 +99504,7 @@ const nvfortran_debian_SUPPORTED_VERSIONS = {
         "20.7",
     ],
     [Arch.ARM64]: [
+        "26.9",
         "26.5",
         "26.3",
         "26.1",
@@ -99348,6 +99555,7 @@ const NV_ARCH = {
 };
 const LEGACY_NCURSES_MAX_VERSION = "24.3";
 const CUDA_VERSIONS = [
+    "13.3",
     "13.2",
     "13.1",
     "13.0",
@@ -99690,6 +99898,23 @@ async function installNVFortran(inputs) {
 
 
 
+// Matches the timeout options every other Debian-based installer sets on its
+// apt-get calls (e.g. gfortran/debian.ts's APT_TIMEOUT_OPTS): fail fast on a
+// hung mirror instead of relying on apt's own (much longer) defaults, and
+// disable apt's built-in retry (Acquire::Retries=0) since the TS-level retry
+// loop below already retries the whole command with backoff.
+const aocc_debian_APT_TIMEOUT_OPTS = [
+    "-o",
+    "Acquire::http::Timeout=30",
+    "-o",
+    "Acquire::http::ConnectTimeout=20",
+    "-o",
+    "Acquire::https::Timeout=30",
+    "-o",
+    "Acquire::https::ConnectTimeout=20",
+    "-o",
+    "Acquire::Retries=0",
+];
 const AOCC_RELEASES = [
     {
         version: "5.2",
@@ -99749,10 +99974,7 @@ async function aocc_debian_installDebian(inputs) {
     else if (!external_fs_namespaceObject.existsSync(metadata.installDir)) {
         const debPath = external_path_.posix.join(external_os_.tmpdir(), metadata.deb);
         info(`Downloading AOCC ${version} from ${metadata.url}...`);
-        // Use tool-cache for resilient HTTP downloading with headers and retries
-        await downloadTool(metadata.url, debPath, undefined, {
-            "User-Agent": "Mozilla/5.0",
-        });
+        await debian_downloadToolWithRetry(metadata.url, debPath);
         info(`Verifying checksum...`);
         await exec_exec("bash", [
             "-c",
@@ -99760,7 +99982,7 @@ async function aocc_debian_installDebian(inputs) {
         ]);
         info(`Installing AOCC ${version}...`);
         await exec_exec("sudo", ["dpkg", "-i", debPath]);
-        await exec_exec("sudo", ["apt-get", "install", "-f", "-y"]);
+        await aptGetFixInstallWithRetry();
         info(`Saving AOCC ${version} to cache...`);
         await exec_exec("sudo", ["mkdir", "-p", tempInstallDir]);
         await exec_exec("sudo", ["cp", "-rT", metadata.installDir, tempInstallDir]);
@@ -99807,6 +100029,57 @@ async function aocc_debian_installDebian(inputs) {
         cxx: "clang++",
     };
     return result;
+}
+// dpkg -i commonly leaves AOCC's declared dependencies unconfigured; this
+// fixup step fetches them over apt, so it is exposed to the same transient
+// mirror/network failures as any other apt-get call and needs the same
+// retry-with-backoff handling.
+async function aptGetFixInstallWithRetry(maxAttempts = 3) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            await exec_exec("sudo", [
+                "timeout",
+                "--signal=TERM",
+                "--kill-after=30s",
+                "15m",
+                "apt-get",
+                "install",
+                "-f",
+                "-y",
+                ...aocc_debian_APT_TIMEOUT_OPTS,
+            ]);
+            return;
+        }
+        catch (err) {
+            if (attempt === maxAttempts)
+                throw err;
+            info(`apt-get install -f failed (attempt ${attempt.toString()}/${maxAttempts.toString()}), retrying in ${(attempt * 10).toString()}s...`);
+            await new Promise((res) => setTimeout(res, attempt * 10_000));
+        }
+    }
+}
+// tc.downloadTool's built-in retries are seconds apart; a CDN wobble lasting
+// minutes needs an outer loop. Mirrors src/installers/ifx/win32.ts.
+async function debian_downloadToolWithRetry(url, destination, maxAttempts = 3) {
+    let lastError;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            return await downloadTool(url, destination, undefined, {
+                "User-Agent": "Mozilla/5.0",
+            });
+        }
+        catch (error) {
+            lastError = error;
+            external_fs_namespaceObject.rmSync(destination, { force: true });
+            if (attempt === maxAttempts)
+                break;
+            const delaySeconds = attempt * 20;
+            info(`Download failed (attempt ${attempt.toString()}/${maxAttempts.toString()}), ` +
+                `retrying in ${delaySeconds.toString()}s: ${String(error)}`);
+            await new Promise((resolve) => setTimeout(resolve, delaySeconds * 1000));
+        }
+    }
+    throw lastError;
 }
 async function aocc_debian_resolveInstalledVersion(binDir) {
     let output = "";
@@ -100120,6 +100393,7 @@ async function flang_debian_resolveInstalledVersion(fc) {
 
 
 
+
 // Make sure the versions are always in descending order. The first one will be
 // used as the default if no version was specified by the user.
 //
@@ -100157,14 +100431,18 @@ async function flang_darwin_installDarwin(inputs) {
     // User specified a major or full patch version — use GitHub releases.
     const { major, patch: userPatch } = parseMajorOrPatch(resolved);
     let patch;
+    let expectedSha256;
     if (userPatch !== undefined) {
         patch = userPatch;
+        const filename = `LLVM-${patch}-${MACOS_ASSET_SUFFIX[inputs.arch]}.tar.xz`;
+        expectedSha256 = await verifyAssetExists("llvm/llvm-project", patch, filename);
     }
     else {
-        patch = await resolveLatestPatch("llvm/llvm-project", major);
+        const suffix = MACOS_ASSET_SUFFIX[inputs.arch];
+        const resolvedAsset = await resolveLatestPatchWithAsset("llvm/llvm-project", major, (p) => `LLVM-${p}-${suffix}.tar.xz`);
+        patch = resolvedAsset.patch;
+        expectedSha256 = resolvedAsset.digest;
     }
-    const filename = `LLVM-${patch}-${MACOS_ASSET_SUFFIX[inputs.arch]}.tar.xz`;
-    const expectedSha256 = await verifyAssetExists("llvm/llvm-project", patch, filename);
     return await installFromGitHub(inputs, major, patch, expectedSha256);
 }
 // Installs flang via Homebrew. The `flang` formula is unversioned and always
@@ -100174,7 +100452,7 @@ async function installBrew(inputs) {
     info(`Installing Flang on macOS (${inputs.arch}) via Homebrew...`);
     info(`Note: the Homebrew flang formula is unversioned — the latest available ` +
         `release will be installed regardless of any version input.`);
-    await exec_exec("brew", ["install", "flang"]);
+    await darwin_brewInstallWithRetry("flang");
     const brewPrefix = await darwin_getBrewPrefix();
     const flangOptDir = external_path_.posix.join(brewPrefix, "opt", "flang");
     const binDir = external_path_.posix.join(flangOptDir, "bin");
@@ -100227,7 +100505,7 @@ async function installFromGitHub(inputs, major, patch, expectedSha256) {
     let toolRoot = find("flang-verified", patch, inputs.arch);
     if (!toolRoot) {
         info(`Downloading ${filename}...`);
-        const downloadPath = await downloadTool(downloadUrl);
+        const downloadPath = await darwin_downloadToolWithRetry(downloadUrl, external_path_.posix.join(external_os_.tmpdir(), filename));
         if (expectedSha256) {
             await verifySha256(downloadPath, expectedSha256);
         }
@@ -100296,6 +100574,47 @@ function resolveFlangBinary(binDir) {
             return candidate;
     }
     throw new Error(`Could not find flang binary in ${binDir}. Checked: flang, flang-new.`);
+}
+// tc.downloadTool's built-in retries are seconds apart; a CDN wobble lasting
+// minutes needs an outer loop. Mirrors src/installers/ifx/win32.ts.
+async function darwin_downloadToolWithRetry(url, destination, maxAttempts = 3) {
+    let lastError;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            return await downloadTool(url, destination);
+        }
+        catch (error) {
+            lastError = error;
+            external_fs_namespaceObject.rmSync(destination, { force: true });
+            if (attempt === maxAttempts)
+                break;
+            const delaySeconds = attempt * 20;
+            info(`Download failed (attempt ${attempt.toString()}/${maxAttempts.toString()}), ` +
+                `retrying in ${delaySeconds.toString()}s: ${String(error)}`);
+            await new Promise((resolve) => setTimeout(resolve, delaySeconds * 1000));
+        }
+    }
+    throw lastError;
+}
+// Mirrors src/installers/gfortran/darwin.ts's brewInstallWithRetry.
+async function darwin_brewInstallWithRetry(formula, maxAttempts = 3) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const exitCode = await exec_exec("brew", ["install", "--skip-post-install", formula], {
+            ignoreReturnCode: true,
+            env: {
+                ...process.env,
+                HOMEBREW_NO_AUTO_UPDATE: "1",
+            },
+        });
+        if (exitCode === 0)
+            return;
+        if (attempt === maxAttempts) {
+            throw new Error(`brew install ${formula} failed after ${maxAttempts.toString()} attempts.`);
+        }
+        const delaySeconds = attempt * 15;
+        info(`brew install ${formula} failed (attempt ${attempt.toString()}/${maxAttempts.toString()}), retrying in ${delaySeconds.toString()}s...`);
+        await new Promise((resolve) => setTimeout(resolve, delaySeconds * 1000));
+    }
 }
 async function darwin_getBrewPrefix() {
     let output = "";
@@ -100483,18 +100802,26 @@ async function win32_installNative(inputs) {
         matchMajorIfPatch: true,
     });
     const { major, patch: userPatch } = parseMajorOrPatch(resolved);
-    let patch;
-    if (userPatch !== undefined) {
-        patch = userPatch;
-    }
-    else {
-        patch = await resolveLatestPatch("llvm/llvm-project", major);
-    }
     const suffix = WINDOWS_INSTALLER_SUFFIX[inputs.arch];
     const majorNum = parseInt(major, 10);
+    let patch;
+    let expectedSha256;
+    if (userPatch !== undefined) {
+        patch = userPatch;
+        const filename = `LLVM-${patch}-${suffix}.${installerExtension(majorNum)}`;
+        expectedSha256 = await verifyAssetExists("llvm/llvm-project", patch, filename);
+    }
+    else {
+        // Newer patches may drop an arch installer (e.g. 23.1.2 ships win64.msi
+        // but no woa64.msi); resolve to the newest patch that has our asset.
+        // The helper already verified the asset and returns its digest.
+        const filenameForPatch = (p) => `LLVM-${p}-${suffix}.${installerExtension(majorNum)}`;
+        const resolvedAsset = await resolveLatestPatchWithAsset("llvm/llvm-project", major, filenameForPatch);
+        patch = resolvedAsset.patch;
+        expectedSha256 = resolvedAsset.digest;
+    }
     const isMsi = majorNum >= 23;
     const filename = `LLVM-${patch}-${suffix}.${installerExtension(majorNum)}`;
-    const expectedSha256 = await verifyAssetExists("llvm/llvm-project", patch, filename);
     const downloadUrl = `https://github.com/llvm/llvm-project/releases/download/llvmorg-${patch}/${filename}`;
     info(`Installing Flang ${major} (${patch}) on Windows (${inputs.arch})...`);
     let toolRoot = find("flang-verified", patch, inputs.arch);
@@ -100810,7 +101137,7 @@ async function lfortran_debian_installDebian(inputs) {
                 "-p",
                 environment.miniforgePrefix,
             ]);
-            await exec_exec(environment.conda, [
+            await condaCreateWithRetry(environment.conda, [
                 "create",
                 "-y",
                 "-p",
