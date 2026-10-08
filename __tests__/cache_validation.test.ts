@@ -66,19 +66,10 @@ describe("compiler cache validation", () => {
     });
 
     await expect(
-      validateRestoredCompilerCache(
-        "compiler",
-        ["/setup"],
-        "tool",
-        ["--version"],
-        { cwd: "/compiler" },
-      ),
+      validateRestoredCompilerCache("compiler", ["/setup"], "tool", [
+        "--version",
+      ]),
     ).resolves.toBe(false);
-    expect(mockedExec).toHaveBeenCalledWith(
-      "tool",
-      ["--version"],
-      expect.objectContaining({ cwd: "/compiler" }),
-    );
     expect(core.info).toHaveBeenCalledWith("compiler not found");
   });
 

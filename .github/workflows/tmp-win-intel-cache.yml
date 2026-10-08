@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   pair:
-    if: false # save/restore already ran in 37825805024
     name: ${{ matrix.compiler }} ${{ matrix.version }}
     strategy:
       fail-fast: false

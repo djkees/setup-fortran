@@ -55,12 +55,12 @@ jobs:
         run: npm run integration-test
         timeout-minutes: 10
       - name: Probe exit codes
-        if: always() && inputs.compiler == 'ifort'
+        if: always()
         shell: pwsh
         run: |
           foreach ($flag in "/what", "/QV", "/logo", "/help", "-V", "--version") {
-            & ifort $flag *> $null
-            "PROBE ifort $flag exit=$LASTEXITCODE"
+            & ${{ inputs.compiler }} $flag *> $null
+            "PROBE ${{ inputs.compiler }} $flag exit=$LASTEXITCODE"
           }
           exit 0
 
@@ -117,11 +117,11 @@ jobs:
         run: npm run integration-test
         timeout-minutes: 10
       - name: Probe exit codes
-        if: always() && inputs.compiler == 'ifort'
+        if: always()
         shell: pwsh
         run: |
           foreach ($flag in "/what", "/QV", "/logo", "/help", "-V", "--version") {
-            & ifort $flag *> $null
-            "PROBE ifort $flag exit=$LASTEXITCODE"
+            & ${{ inputs.compiler }} $flag *> $null
+            "PROBE ${{ inputs.compiler }} $flag exit=$LASTEXITCODE"
           }
           exit 0

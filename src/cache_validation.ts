@@ -1,6 +1,8 @@
 import * as core from "@actions/core";
 import * as exec from "@actions/exec";
 import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import * as cache from "@actions/cache";
 
 export async function validateRestoredCompilerCache(
@@ -8,7 +10,6 @@ export async function validateRestoredCompilerCache(
   requiredPaths: string[],
   command: string,
   args: string[],
-  options: exec.ExecOptions = {},
 ): Promise<boolean> {
   const missing = requiredPaths.filter((entry) => !fs.existsSync(entry));
   if (missing.length > 0) {
@@ -24,7 +25,6 @@ export async function validateRestoredCompilerCache(
       output += data.toString();
     };
     const exitCode = await exec.exec(command, args, {
-      ...options,
       ignoreReturnCode: true,
       silent: true,
       listeners: { stdout: append, stderr: append },
@@ -40,6 +40,30 @@ export async function validateRestoredCompilerCache(
     );
   }
   return false;
+}
+
+// Initializes MSVC before setvars.bat, as the installers do when exporting the
+// environment: older setvars.bat cannot find newer Visual Studio releases.
+export async function validateRestoredIntelWindowsCache(
+  label: string,
+  setvarsBat: string,
+  compiler: string,
+): Promise<boolean> {
+  const batFile = path.win32.join(os.tmpdir(), `validate_${compiler}.bat`);
+  fs.writeFileSync(
+    batFile,
+    [
+      `@echo off`,
+      `for /f "usebackq tokens=*" %%i in (\`"%ProgramFiles(x86)%\\Microsoft Visual Studio\\Installer\\vswhere.exe" -latest -property installationPath\`) do set VS_INSTALL_DIR=%%i`,
+      `if exist "%VS_INSTALL_DIR%\\VC\\Auxiliary\\Build\\vcvars64.bat" call "%VS_INSTALL_DIR%\\VC\\Auxiliary\\Build\\vcvars64.bat"`,
+      `call "${setvarsBat}" --force`,
+      `${compiler} /QV`,
+    ].join("\r\n"),
+  );
+  return validateRestoredCompilerCache(label, [setvarsBat], "cmd", [
+    "/C",
+    batFile,
+  ]);
 }
 
 export async function saveCompilerCache(

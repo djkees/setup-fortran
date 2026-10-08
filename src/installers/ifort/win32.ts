@@ -16,7 +16,7 @@ import { addMsvcBinFromPath } from "../../setup_msvc";
 import { verifyIntelAuthenticode } from "../../verify_download";
 import {
   saveCompilerCache,
-  validateRestoredCompilerCache,
+  validateRestoredIntelWindowsCache,
 } from "../../cache_validation";
 
 // ifort (Intel Fortran Compiler Classic) was discontinued in 2024.
@@ -93,17 +93,10 @@ export async function installWin32(
 
   const cacheHit = await cache.restoreCache(cachePaths, cacheKey);
   const cacheValid = cacheHit
-    ? await validateRestoredCompilerCache(
+    ? await validateRestoredIntelWindowsCache(
         `ifort ${version}`,
-        [SETVARS_BAT],
-        "cmd",
-        [
-          "/D",
-          "/S",
-          "/C",
-          "call setvars.bat --force && ifort /what 2>&1 | findstr Version",
-        ],
-        { cwd: ONEAPI_ROOT },
+        SETVARS_BAT,
+        "ifort",
       )
     : false;
   if (cacheValid) {
