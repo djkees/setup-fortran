@@ -20,7 +20,7 @@ export async function validateRestoredCompilerCache(
 
   try {
     let output = "";
-    const append = (data: Buffer) => {
+    const append = (data: Buffer): void => {
       output += data.toString();
     };
     const exitCode = await exec.exec(command, args, {

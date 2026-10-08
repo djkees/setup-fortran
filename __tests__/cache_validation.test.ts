@@ -59,6 +59,29 @@ describe("compiler cache validation", () => {
     ).resolves.toBe(false);
   });
 
+  it("logs the output of a failed validation", async () => {
+    mockedExec.mockImplementation(async (_command, _args, options) => {
+      options?.listeners?.stderr?.(Buffer.from("compiler not found"));
+      return 1;
+    });
+
+    await expect(
+      validateRestoredCompilerCache(
+        "compiler",
+        ["/setup"],
+        "tool",
+        ["--version"],
+        { cwd: "/compiler" },
+      ),
+    ).resolves.toBe(false);
+    expect(mockedExec).toHaveBeenCalledWith(
+      "tool",
+      ["--version"],
+      expect.objectContaining({ cwd: "/compiler" }),
+    );
+    expect(core.info).toHaveBeenCalledWith("compiler not found");
+  });
+
   it("does not fail an installation when cache saving is unavailable", async () => {
     (
       cache.saveCache as jest.MockedFunction<typeof cache.saveCache>
