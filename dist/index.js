@@ -101198,7 +101198,12 @@ async function ifort_win32_installWin32(inputs) {
         ]);
     }
     const cacheValid = cacheHit
-        ? await validateRestoredCompilerCache(`ifort ${version}`, [win32_SETVARS_BAT], "cmd", ["/D", "/S", "/C", `"call "${win32_SETVARS_BAT}" --force && ifort /what"`], { windowsVerbatimArguments: true })
+        ? await validateRestoredCompilerCache(`ifort ${version}`, [win32_SETVARS_BAT], "cmd", [
+            "/D",
+            "/S",
+            "/C",
+            `"call "${win32_SETVARS_BAT}" --force && ifort /what 2>&1 | findstr /C:"Version 20""`,
+        ], { windowsVerbatimArguments: true })
         : false;
     if (cacheValid) {
         info(`Restored ifort installation from cache (${cacheHit ?? cacheKey}).`);

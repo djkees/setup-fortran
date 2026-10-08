@@ -111,7 +111,12 @@ export async function installWin32(
         `ifort ${version}`,
         [SETVARS_BAT],
         "cmd",
-        ["/D", "/S", "/C", `"call "${SETVARS_BAT}" --force && ifort /what"`],
+        [
+          "/D",
+          "/S",
+          "/C",
+          `"call "${SETVARS_BAT}" --force && ifort /what 2>&1 | findstr /C:"Version 20""`,
+        ],
         { windowsVerbatimArguments: true },
       )
     : false;
