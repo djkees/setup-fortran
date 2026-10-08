@@ -75,6 +75,14 @@ jobs:
         image: [windows-2022, windows-2025]
     steps:
       - uses: actions/checkout@v7
+      - name: Require cache entry (fail on miss, not on validation)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          KEY: ${{ inputs.compiler }}-win32-validated-v1-x64-${{ inputs.version }}
+        run: |
+          gh cache list --key "$KEY" --limit 100 --json key --jq '.[].key' | grep -Fx "$KEY"             || { echo "::error::cache miss for $KEY"; exit 1; }
       - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc

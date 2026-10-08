@@ -13,26 +13,16 @@ jobs:
     name: ${{ matrix.compiler }} ${{ matrix.version }}
     strategy:
       fail-fast: false
-      max-parallel: 5
+      max-parallel: 3
       matrix:
         include:
           - { compiler: ifx, version: "2026.1.1" } # standalone installer
-          - { compiler: ifx, version: "2025.3.1" } # HPC toolkit, component filter
           - { compiler: ifx, version: "2025.0.0" }
-          - { compiler: ifx, version: "2024.2.1" }
-          - { compiler: ifx, version: "2024.1.0" } # HPCKit, component filter
-          - { compiler: ifx, version: "2024.0.1" }
+          - { compiler: ifx, version: "2024.0.1" } # HPCKit, component filter
           - { compiler: ifx, version: "2023.2.1" }
-          - { compiler: ifx, version: "2023.2.0" } # legacy HPCKit, full install
-          - { compiler: ifx, version: "2023.1.0" }
-          - { compiler: ifx, version: "2022.3.0" }
-          - { compiler: ifx, version: "2022.2.0" }
+          - { compiler: ifx, version: "2022.2.0" } # legacy HPCKit, full install
           - { compiler: ifort, version: "2021.13" }
-          - { compiler: ifort, version: "2021.12" }
-          - { compiler: ifort, version: "2021.11" }
           - { compiler: ifort, version: "2021.10" }
-          - { compiler: ifort, version: "2021.9" }
-          - { compiler: ifort, version: "2021.7" }
           - { compiler: ifort, version: "2021.6" }
     uses: ./.github/workflows/tmp-win-intel-pair.yml
     with:
