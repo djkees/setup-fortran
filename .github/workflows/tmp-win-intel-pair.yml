@@ -1,0 +1,119 @@
+name: tmp windows intel save/restore pair
+
+on:
+  workflow_call:
+    inputs:
+      compiler:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  save:
+    name: save
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Build test bundles
+        run: |
+          npm ci
+          npm run build:verify-installation
+          npm run build:integration-test
+      - name: Install
+        id: setup
+        uses: ./
+        timeout-minutes: 45
+        with:
+          compiler: ${{ inputs.compiler }}
+          version: ${{ inputs.version }}
+      - name: Verify installation
+        shell: bash
+        env:
+          OUTPUT_VERSION: ${{ steps.setup.outputs.version }}
+          OUTPUT_FC: ${{ steps.setup.outputs.fc }}
+          OUTPUT_CC: ${{ steps.setup.outputs.cc }}
+          OUTPUT_CXX: ${{ steps.setup.outputs.cxx }}
+        run: npm run verify-installation
+      - name: Verify compiler invocation under pwsh/cmd
+        uses: ./.github/actions/verify-windows-shells
+        with:
+          fc: ${{ steps.setup.outputs.fc }}
+          cc: ${{ steps.setup.outputs.cc }}
+          cxx: ${{ steps.setup.outputs.cxx }}
+      - name: Run Integration Tests
+        run: npm run integration-test
+        timeout-minutes: 10
+      - name: Probe exit codes
+        if: always() && inputs.compiler == 'ifort'
+        shell: pwsh
+        run: |
+          foreach ($flag in "/what", "/QV", "/logo", "/help", "-V", "--version") {
+            & ifort $flag *> $null
+            "PROBE ifort $flag exit=$LASTEXITCODE"
+          }
+          exit 0
+
+  restore:
+    name: restore ${{ matrix.image }}
+    needs: [save]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [windows-2022, windows-2025]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Build test bundles
+        run: |
+          npm ci
+          npm run build:verify-installation
+          npm run build:integration-test
+      - name: Install
+        id: setup
+        uses: ./
+        timeout-minutes: 45
+        with:
+          compiler: ${{ inputs.compiler }}
+          version: ${{ inputs.version }}
+      - name: Verify installation
+        shell: bash
+        env:
+          OUTPUT_VERSION: ${{ steps.setup.outputs.version }}
+          OUTPUT_FC: ${{ steps.setup.outputs.fc }}
+          OUTPUT_CC: ${{ steps.setup.outputs.cc }}
+          OUTPUT_CXX: ${{ steps.setup.outputs.cxx }}
+        run: npm run verify-installation
+      - name: Verify compiler invocation under pwsh/cmd
+        uses: ./.github/actions/verify-windows-shells
+        with:
+          fc: ${{ steps.setup.outputs.fc }}
+          cc: ${{ steps.setup.outputs.cc }}
+          cxx: ${{ steps.setup.outputs.cxx }}
+      - name: Run Integration Tests
+        run: npm run integration-test
+        timeout-minutes: 10
+      - name: Probe exit codes
+        if: always() && inputs.compiler == 'ifort'
+        shell: pwsh
+        run: |
+          foreach ($flag in "/what", "/QV", "/logo", "/help", "-V", "--version") {
+            & ifort $flag *> $null
+            "PROBE ifort $flag exit=$LASTEXITCODE"
+          }
+          exit 0

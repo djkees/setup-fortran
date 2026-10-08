@@ -99847,7 +99847,7 @@ async function installGFortran(inputs) {
 
 
 
-async function validateRestoredCompilerCache(label, requiredPaths, command, args, execOptions = {}) {
+async function validateRestoredCompilerCache(label, requiredPaths, command, args, options = {}) {
     const missing = requiredPaths.filter((entry) => !external_fs_namespaceObject.existsSync(entry));
     if (missing.length > 0) {
         info(`Restored ${label} cache is incomplete; missing: ${missing.join(", ")}. Reinstalling.`);
@@ -99855,19 +99855,19 @@ async function validateRestoredCompilerCache(label, requiredPaths, command, args
     }
     try {
         let output = "";
+        const append = (data) => {
+            output += data.toString();
+        };
         const exitCode = await exec_exec(command, args, {
-            ...execOptions,
+            ...options,
             ignoreReturnCode: true,
             silent: true,
-            listeners: {
-                stdout: (data) => (output += data.toString()),
-                stderr: (data) => (output += data.toString()),
-            },
+            listeners: { stdout: append, stderr: append },
         });
-        info(`[diag] ${label} validation exit code ${exitCode.toString()}, output:
-${output.trim()}`);
         if (exitCode === 0)
             return true;
+        if (output.trim())
+            info(output.trim());
         info(`Restored ${label} cache failed compiler validation with exit code ${exitCode.toString()}. Reinstalling.`);
     }
     catch (error) {
@@ -100328,17 +100328,8 @@ async function win32_installWin32(inputs) {
             await new Promise((res) => setTimeout(res, attempt * 10_000));
         }
     }
-    if (cacheHit) {
-        // [diag] the command as it is on develop, result ignored
-        await validateRestoredCompilerCache(`ifx ${version} (develop command)`, [SETVARS_BAT], "cmd", [
-            "/D",
-            "/S",
-            "/C",
-            `call "${SETVARS_BAT}" --force >nul && ifx --version >nul`,
-        ]);
-    }
     const cacheValid = cacheHit
-        ? await validateRestoredCompilerCache(`ifx ${version}`, [SETVARS_BAT], "cmd", ["/D", "/S", "/C", `"call "${SETVARS_BAT}" --force && ifx --version"`], { windowsVerbatimArguments: true })
+        ? await validateRestoredCompilerCache(`ifx ${version}`, [SETVARS_BAT], "cmd", ["/D", "/S", "/C", "call setvars.bat --force && ifx --version"], { cwd: ONEAPI_ROOT })
         : false;
     if (cacheValid) {
         info(`Restored ifx installation from cache (${cacheHit ?? cacheKey}).`);
@@ -101188,22 +101179,13 @@ async function ifort_win32_installWin32(inputs) {
         external_fs_namespaceObject.mkdirSync(win32_ONEAPI_ROOT, { recursive: true });
     }
     const cacheHit = await restoreCache(cachePaths, cacheKey);
-    if (cacheHit) {
-        // [diag] the command as it is on develop, result ignored
-        await validateRestoredCompilerCache(`ifort ${version} (develop command)`, [win32_SETVARS_BAT], "cmd", [
-            "/D",
-            "/S",
-            "/C",
-            `call "${win32_SETVARS_BAT}" --force >nul && ifort /what >nul`,
-        ]);
-    }
     const cacheValid = cacheHit
         ? await validateRestoredCompilerCache(`ifort ${version}`, [win32_SETVARS_BAT], "cmd", [
             "/D",
             "/S",
             "/C",
-            `"call "${win32_SETVARS_BAT}" --force && ifort /what 2>&1 | findstr /C:"Version 20""`,
-        ], { windowsVerbatimArguments: true })
+            "call setvars.bat --force && ifort /what 2>&1 | findstr Version",
+        ], { cwd: win32_ONEAPI_ROOT })
         : false;
     if (cacheValid) {
         info(`Restored ifort installation from cache (${cacheHit ?? cacheKey}).`);

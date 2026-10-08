@@ -8,7 +8,7 @@ export async function validateRestoredCompilerCache(
   requiredPaths: string[],
   command: string,
   args: string[],
-  execOptions: exec.ExecOptions = {},
+  options: exec.ExecOptions = {},
 ): Promise<boolean> {
   const missing = requiredPaths.filter((entry) => !fs.existsSync(entry));
   if (missing.length > 0) {
@@ -20,20 +20,17 @@ export async function validateRestoredCompilerCache(
 
   try {
     let output = "";
+    const append = (data: Buffer) => {
+      output += data.toString();
+    };
     const exitCode = await exec.exec(command, args, {
-      ...execOptions,
+      ...options,
       ignoreReturnCode: true,
       silent: true,
-      listeners: {
-        stdout: (data: Buffer) => (output += data.toString()),
-        stderr: (data: Buffer) => (output += data.toString()),
-      },
+      listeners: { stdout: append, stderr: append },
     });
-    core.info(
-      `[diag] ${label} validation exit code ${exitCode.toString()}, output:
-${output.trim()}`,
-    );
     if (exitCode === 0) return true;
+    if (output.trim()) core.info(output.trim());
     core.info(
       `Restored ${label} cache failed compiler validation with exit code ${exitCode.toString()}. Reinstalling.`,
     );
