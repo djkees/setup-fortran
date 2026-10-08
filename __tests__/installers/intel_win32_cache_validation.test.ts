@@ -149,3 +149,36 @@ describeOnWindows.each(COMPILERS)(
     });
   },
 );
+
+describe.each(COMPILERS)(
+  "restored $compiler cache validation command",
+  ({ compiler, version, install }) => {
+    it("runs from the oneAPI directory without nested quotes", async () => {
+      const mockedExec = exec.exec as jest.MockedFunction<typeof exec.exec>;
+      jest.clearAllMocks();
+      (fs.existsSync as jest.Mock).mockReturnValue(true);
+      (cache.restoreCache as jest.Mock).mockResolvedValue("cache-hit");
+      mockedExec.mockImplementation(async (_commandLine, _args, options) => {
+        options?.listeners?.stdout?.(Buffer.from("PATH=C:/bin"));
+        return 0;
+      });
+
+      await install({
+        compiler,
+        version,
+        os: OS.Windows,
+        osVersion: "10.0.19045",
+        arch: Arch.X64,
+        cleanupDisk: false,
+        updateEnvironment: true,
+        msystem: Msystem.Native,
+      });
+
+      const probe = mockedExec.mock.calls.find(
+        ([commandLine, args]) => commandLine === "cmd" && args?.[0] === "/D",
+      );
+      expect(probe?.[1]?.join(" ")).not.toContain('"');
+      expect(probe?.[2]?.cwd).toBe(ONEAPI_ROOT);
+    });
+  },
+);

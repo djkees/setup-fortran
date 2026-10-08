@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   pair:
+    if: false # save/restore already ran in 37825805024
     name: ${{ matrix.compiler }} ${{ matrix.version }}
     strategy:
       fail-fast: false
@@ -44,5 +45,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run format:check
+        if: runner.os != 'Windows'
       - run: npm run lint
       - run: npm run test -- --verbose
