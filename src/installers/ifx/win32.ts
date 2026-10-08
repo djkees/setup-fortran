@@ -186,17 +186,27 @@ export async function installWin32(
     }
   }
 
+  if (cacheHit) {
+    // [diag] the command as it is on develop, result ignored
+    await validateRestoredCompilerCache(
+      `ifx ${version} (develop command)`,
+      [SETVARS_BAT],
+      "cmd",
+      [
+        "/D",
+        "/S",
+        "/C",
+        `call "${SETVARS_BAT}" --force >nul && ifx --version >nul`,
+      ],
+    );
+  }
   const cacheValid = cacheHit
     ? await validateRestoredCompilerCache(
         `ifx ${version}`,
         [SETVARS_BAT],
         "cmd",
-        [
-          "/D",
-          "/S",
-          "/C",
-          `call "${SETVARS_BAT}" --force >nul && ifx --version >nul`,
-        ],
+        ["/D", "/S", "/C", `"call "${SETVARS_BAT}" --force && ifx --version"`],
+        { windowsVerbatimArguments: true },
       )
     : false;
 

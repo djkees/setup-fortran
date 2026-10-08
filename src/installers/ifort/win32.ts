@@ -92,17 +92,27 @@ export async function installWin32(
   }
 
   const cacheHit = await cache.restoreCache(cachePaths, cacheKey);
+  if (cacheHit) {
+    // [diag] the command as it is on develop, result ignored
+    await validateRestoredCompilerCache(
+      `ifort ${version} (develop command)`,
+      [SETVARS_BAT],
+      "cmd",
+      [
+        "/D",
+        "/S",
+        "/C",
+        `call "${SETVARS_BAT}" --force >nul && ifort /what >nul`,
+      ],
+    );
+  }
   const cacheValid = cacheHit
     ? await validateRestoredCompilerCache(
         `ifort ${version}`,
         [SETVARS_BAT],
         "cmd",
-        [
-          "/D",
-          "/S",
-          "/C",
-          `call "${SETVARS_BAT}" --force >nul && ifort /what >nul`,
-        ],
+        ["/D", "/S", "/C", `"call "${SETVARS_BAT}" --force && ifort /what"`],
+        { windowsVerbatimArguments: true },
       )
     : false;
   if (cacheValid) {
