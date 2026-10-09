@@ -16,7 +16,7 @@ import { addMsvcBinFromPath } from "../../setup_msvc";
 import { verifyIntelAuthenticode } from "../../verify_download";
 import {
   saveCompilerCache,
-  validateRestoredCompilerCache,
+  validateRestoredIntelWindowsCache,
 } from "../../cache_validation";
 
 // Only versions with a known installer URL are listed.
@@ -187,16 +187,10 @@ export async function installWin32(
   }
 
   const cacheValid = cacheHit
-    ? await validateRestoredCompilerCache(
+    ? await validateRestoredIntelWindowsCache(
         `ifx ${version}`,
-        [SETVARS_BAT],
-        "cmd",
-        [
-          "/D",
-          "/S",
-          "/C",
-          `call "${SETVARS_BAT}" --force >nul && ifx --version >nul`,
-        ],
+        SETVARS_BAT,
+        "ifx",
       )
     : false;
 

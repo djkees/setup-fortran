@@ -99847,6 +99847,8 @@ async function installGFortran(inputs) {
 
 
 
+
+
 async function validateRestoredCompilerCache(label, requiredPaths, command, args) {
     const missing = requiredPaths.filter((entry) => !external_fs_namespaceObject.existsSync(entry));
     if (missing.length > 0) {
@@ -99854,18 +99856,41 @@ async function validateRestoredCompilerCache(label, requiredPaths, command, args
         return false;
     }
     try {
+        let output = "";
+        const append = (data) => {
+            output += data.toString();
+        };
         const exitCode = await exec_exec(command, args, {
             ignoreReturnCode: true,
             silent: true,
+            listeners: { stdout: append, stderr: append },
         });
         if (exitCode === 0)
             return true;
+        if (output.trim())
+            info(output.trim());
         info(`Restored ${label} cache failed compiler validation with exit code ${exitCode.toString()}. Reinstalling.`);
     }
     catch (error) {
         info(`Restored ${label} cache failed compiler validation: ${String(error)}. Reinstalling.`);
     }
     return false;
+}
+// Initializes MSVC before setvars.bat, as the installers do when exporting the
+// environment: older setvars.bat cannot find newer Visual Studio releases.
+async function validateRestoredIntelWindowsCache(label, setvarsBat, compiler) {
+    const batFile = external_path_namespaceObject.win32.join(external_os_.tmpdir(), `validate_${compiler}.bat`);
+    external_fs_namespaceObject.writeFileSync(batFile, [
+        `@echo off`,
+        `for /f "usebackq tokens=*" %%i in (\`"%ProgramFiles(x86)%\\Microsoft Visual Studio\\Installer\\vswhere.exe" -latest -property installationPath\`) do set VS_INSTALL_DIR=%%i`,
+        `if exist "%VS_INSTALL_DIR%\\VC\\Auxiliary\\Build\\vcvars64.bat" call "%VS_INSTALL_DIR%\\VC\\Auxiliary\\Build\\vcvars64.bat"`,
+        `call "${setvarsBat}" --force`,
+        `${compiler} /QV`,
+    ].join("\r\n"));
+    return validateRestoredCompilerCache(label, [setvarsBat], "cmd", [
+        "/C",
+        batFile,
+    ]);
 }
 async function saveCompilerCache(paths, key) {
     try {
@@ -100321,12 +100346,7 @@ async function win32_installWin32(inputs) {
         }
     }
     const cacheValid = cacheHit
-        ? await validateRestoredCompilerCache(`ifx ${version}`, [SETVARS_BAT], "cmd", [
-            "/D",
-            "/S",
-            "/C",
-            `call "${SETVARS_BAT}" --force >nul && ifx --version >nul`,
-        ])
+        ? await validateRestoredIntelWindowsCache(`ifx ${version}`, SETVARS_BAT, "ifx")
         : false;
     if (cacheValid) {
         info(`Restored ifx installation from cache (${cacheHit ?? cacheKey}).`);
@@ -101308,12 +101328,7 @@ async function ifort_win32_installWin32(inputs) {
     }
     const cacheHit = await restoreCache(cachePaths, cacheKey);
     const cacheValid = cacheHit
-        ? await validateRestoredCompilerCache(`ifort ${version}`, [win32_SETVARS_BAT], "cmd", [
-            "/D",
-            "/S",
-            "/C",
-            `call "${win32_SETVARS_BAT}" --force >nul && ifort /what >nul`,
-        ])
+        ? await validateRestoredIntelWindowsCache(`ifort ${version}`, win32_SETVARS_BAT, "ifort")
         : false;
     if (cacheValid) {
         info(`Restored ifort installation from cache (${cacheHit ?? cacheKey}).`);
