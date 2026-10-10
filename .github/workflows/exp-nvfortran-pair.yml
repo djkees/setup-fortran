@@ -1,0 +1,85 @@
+name: exp nvfortran pair
+
+on:
+  workflow_call:
+    inputs:
+      version: { type: string, required: true }
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  NV_DIR: /opt/nvidia/hpc_sdk/Linux_x86_64/${{ inputs.version }}
+
+jobs:
+  save:
+    name: save on ubuntu-24.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install nvfortran
+        uses: ./
+        with:
+          compiler: nvfortran
+          version: ${{ inputs.version }}
+          cleanup-disk: true
+      - name: Show localrc
+        run: |
+          ls -la "$NV_DIR/compilers/bin" | grep -i rc || true
+          for f in "$NV_DIR"/compilers/bin/localrc*; do echo "== $f"; cat "$f"; done || true
+      # Same directory and tar flags the action passes to the cache.
+      - name: Archive the cached directory
+        run: tar --posix -cf "$RUNNER_TEMP/nvhpc.tzst" -P --use-compress-program zstdmt "$NV_DIR"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nvhpc-${{ inputs.version }}
+          path: ${{ runner.temp }}/nvhpc.tzst
+          compression-level: 0
+          retention-days: 1
+
+  restore:
+    name: restore on ${{ matrix.image }}
+    needs: [save]
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [ubuntu-26.04, ubuntu-22.04]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: nvhpc-${{ inputs.version }}
+          path: ${{ runner.temp }}
+      - name: Restore the directory only (what a cache hit does)
+        run: |
+          sudo tar -xf "$RUNNER_TEMP/nvhpc.tzst" -P --use-compress-program unzstd
+          rm "$RUNNER_TEMP/nvhpc.tzst"
+          echo "$NV_DIR/compilers/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$NV_DIR/compilers/lib" >> "$GITHUB_ENV"
+          echo "FC=nvfortran" >> "$GITHUB_ENV"
+          echo "CC=nvc" >> "$GITHUB_ENV"
+          echo "CXX=nvc++" >> "$GITHUB_ENV"
+          echo "FORTRAN_COMPILER=nvfortran" >> "$GITHUB_ENV"
+      - name: Legacy ncurses present?
+        run: dpkg-query -W -f='${Package} ${Status}\n' libncursesw5 libtinfo5 || true
+      - name: Validation probe (what the action runs on a hit)
+        run: nvfortran --version
+      - name: Missing shared libraries
+        run: |
+          for b in nvfortran nvc nvc++; do ldd "$NV_DIR/compilers/bin/$b" | grep "not found" || true; done
+          find "$NV_DIR/compilers/bin" -maxdepth 2 -type f -executable | while read -r b; do
+            ldd "$b" 2>/dev/null | grep "not found" | sed "s|^|$b:|" || true
+          done | sort -u | head -40
+      - name: Show localrc
+        run: for f in "$NV_DIR"/compilers/bin/localrc*; do echo "== $f"; cat "$f"; done || true
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci
+      - run: npm run build:integration-test
+      - name: Run Integration Tests
+        run: npm run integration-test

@@ -1,0 +1,36 @@
+name: Cache cross-image experiment
+
+# Throwaway experiment for fortran-lang/setup-fortran#273. Not for merging.
+on:
+  push:
+    branches: [exp/cache-cross-image]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  intel:
+    name: ${{ matrix.compiler }} ${{ matrix.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { compiler: ifx, version: "2026.1" }
+          - { compiler: ifx, version: "2022.2.1" }
+          - { compiler: ifort, version: "2021.13" }
+          - { compiler: ifort, version: "2021.6" }
+    uses: ./.github/workflows/exp-intel-pair.yml
+    with:
+      compiler: ${{ matrix.compiler }}
+      version: ${{ matrix.version }}
+
+  nvfortran:
+    name: nvfortran ${{ matrix.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["26.9", "24.3"]
+    uses: ./.github/workflows/exp-nvfortran-pair.yml
+    with:
+      version: ${{ matrix.version }}
