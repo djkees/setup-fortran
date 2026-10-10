@@ -16,7 +16,7 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                image: [ubuntu-24.04, ubuntu-22.04]
+                image: [ubuntu-24.04, ubuntu-22.04, ubuntu-26.04]
 
                 toolchain:
                     - { compiler: aocc, version: "5.2" }

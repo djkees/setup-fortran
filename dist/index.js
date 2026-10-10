@@ -101712,7 +101712,7 @@ async function installTarball(version, inputs) {
     }
     const archiveBase = `${archivePrefix}${cudaVersion}`;
     const archiveName = `${archiveBase}.tar.gz`;
-    const tempDir = external_fs_namespaceObject.mkdtempSync(external_path_namespaceObject.join(external_os_.tmpdir(), "setup-fortran-nvhpc-"));
+    const tempDir = external_fs_namespaceObject.mkdtempSync(external_path_namespaceObject.join(process.env.RUNNER_TEMP ?? external_os_.tmpdir(), "setup-fortran-nvhpc-"));
     const archivePath = external_path_namespaceObject.posix.join(tempDir, archiveName);
     const url = `https://developer.download.nvidia.com/hpc-sdk/${version}/` + archiveName;
     try {
@@ -102011,8 +102011,13 @@ async function aocc_debian_installDebian(inputs) {
             `echo "${metadata.sha256}  ${debPath}" | sha256sum -c -`,
         ]);
         info(`Installing AOCC ${version}...`);
-        await exec_exec("sudo", ["dpkg", "-i", debPath]);
-        await aptGetFixInstallWithRetry();
+        if (dependsOnRenamedLibxml2(inputs.osVersion)) {
+            await installDebWithoutDependencyCheck(debPath, metadata.installDir);
+        }
+        else {
+            await exec_exec("sudo", ["dpkg", "-i", debPath]);
+            await aocc_debian_aptGetInstallWithRetry(["install", "-f", "-y"], "install -f");
+        }
         info(`Saving AOCC ${version} to cache...`);
         await exec_exec("sudo", ["mkdir", "-p", tempInstallDir]);
         await exec_exec("sudo", ["cp", "-rT", metadata.installDir, tempInstallDir]);
@@ -102060,11 +102065,42 @@ async function aocc_debian_installDebian(inputs) {
     };
     return result;
 }
-// dpkg -i commonly leaves AOCC's declared dependencies unconfigured; this
-// fixup step fetches them over apt, so it is exposed to the same transient
-// mirror/network failures as any other apt-get call and needs the same
-// retry-with-backoff handling.
-async function aptGetFixInstallWithRetry(maxAttempts = 3) {
+// Ubuntu 26.04 renamed libxml2 to libxml2-16, so the .deb's `Depends: libxml2`
+// can't be satisfied. AOCC doesn't link libxml2, so the check is skipped there.
+function dependsOnRenamedLibxml2(osVersion) {
+    const match = /ubuntu(\d+)|\b(\d+)\.04\b/.exec(osVersion);
+    const major = Number(match?.[1] ?? match?.[2]);
+    return major >= 26;
+}
+// The .deb's Depends, minus libxml2 (see above) and libncurses5-dev, which
+// nothing in the package links.
+const DEB_RUNTIME_DEPENDENCIES = [
+    "libstdc++6",
+    "libzstd1",
+    "libquadmath0",
+    "zlib1g",
+    "gcc",
+];
+// The .deb ships only /opt/AMD and has no maintainer scripts, so unpacking it
+// is equivalent to installing it. Extract to a temp dir first: dpkg-deb -x
+// onto / would reset the modes of / and /opt.
+async function installDebWithoutDependencyCheck(debPath, installDir) {
+    await aocc_debian_aptGetInstallWithRetry(["install", "-y", ...DEB_RUNTIME_DEPENDENCIES], "install -y");
+    const extractDir = external_path_namespaceObject.posix.join(external_os_.tmpdir(), "aocc-deb-extract");
+    await exec_exec("rm", ["-rf", extractDir]);
+    await exec_exec("dpkg-deb", ["-x", debPath, extractDir]);
+    await exec_exec("sudo", ["mkdir", "-p", installDir]);
+    await exec_exec("sudo", [
+        "cp",
+        "-rT",
+        external_path_namespaceObject.posix.join(extractDir, installDir),
+        installDir,
+    ]);
+    await exec_exec("rm", ["-rf", extractDir]);
+}
+// Used for both the `install -f` fixup and the explicit dependency install:
+// apt fetches over the network, so transient mirror failures get retried.
+async function aocc_debian_aptGetInstallWithRetry(args, label, maxAttempts = 3) {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
             await exec_exec("sudo", [
@@ -102073,9 +102109,7 @@ async function aptGetFixInstallWithRetry(maxAttempts = 3) {
                 "--kill-after=30s",
                 "15m",
                 "apt-get",
-                "install",
-                "-f",
-                "-y",
+                ...args,
                 ...aocc_debian_APT_TIMEOUT_OPTS,
             ]);
             return;
@@ -102083,7 +102117,7 @@ async function aptGetFixInstallWithRetry(maxAttempts = 3) {
         catch (err) {
             if (attempt === maxAttempts)
                 throw err;
-            info(`apt-get install -f failed (attempt ${attempt.toString()}/${maxAttempts.toString()}), retrying in ${(attempt * 10).toString()}s...`);
+            info(`apt-get ${label} failed (attempt ${attempt.toString()}/${maxAttempts.toString()}), retrying in ${(attempt * 10).toString()}s...`);
             await new Promise((res) => setTimeout(res, attempt * 10_000));
         }
     }
@@ -102161,6 +102195,8 @@ async function installAOCC(inputs) {
 //   - Ubuntu 22.04 (jammy): LLVM 23 is the first release with no jammy repo at
 //     all (apt.llvm.org stopped publishing for it), so 23+ are noble-only and
 //     rejected with an explicit error in installDebian.
+//   - Ubuntu 26.04 (resolute): apt.llvm.org only publishes LLVM 21 and newer,
+//     so 16–20 are rejected with an explicit error in installDebian.
 const flang_debian_SUPPORTED_VERSIONS = {
     [Arch.X64]: ["23", "22", "21", "20", "19", "18", "17", "16"],
     [Arch.ARM64]: ["23", "22", "21", "20", "19", "18", "17"],
@@ -102178,13 +102214,16 @@ const debian_APT_NETWORK_OPTIONS = [
     "Acquire::https::Timeout=10",
 ];
 function ubuntuCodename(osVersion) {
+    if (osVersion.includes("26.04") || osVersion.includes("ubuntu26")) {
+        return "resolute";
+    }
     if (osVersion.includes("24.04") || osVersion.includes("ubuntu24")) {
         return "noble";
     }
     if (osVersion.includes("22.04") || osVersion.includes("ubuntu22")) {
         return "jammy";
     }
-    throw new Error(`Flang is only supported on Ubuntu 22.04 and 24.04 (got: ${osVersion}).`);
+    throw new Error(`Flang is only supported on Ubuntu 22.04, 24.04 and 26.04 (got: ${osVersion}).`);
 }
 async function configureLlvmAptRepository(version, codename) {
     const tempDir = external_fs_namespaceObject.mkdtempSync(external_path_namespaceObject.join(external_os_.tmpdir(), "setup-fortran-llvm-"));
@@ -102280,6 +102319,11 @@ async function flang_debian_installDebian(inputs) {
         throw new Error(`Flang ${version} is not available on Ubuntu 22.04 (jammy): the LLVM ` +
             `apt repository no longer publishes LLVM 23+ packages for jammy. ` +
             `Use an ubuntu-24.04 runner or request Flang 22 or older.`);
+    }
+    if (major < 21 && codename === "resolute") {
+        throw new Error(`Flang ${version} is not available on Ubuntu 26.04 (resolute): the LLVM ` +
+            `apt repository only publishes LLVM 21 and newer for resolute. ` +
+            `Use an ubuntu-24.04 runner or request Flang 21 or newer.`);
     }
     info(`Installing Flang ${version} on Linux (${inputs.arch})...`);
     info(`Adding the verified LLVM ${version} apt repository...`);
@@ -103602,6 +103646,13 @@ const armflang_debian_SUPPORTED_VERSIONS = {
     [Arch.X64]: undefined,
     [Arch.ARM64]: ["23.1", "22.1", "21.1", "20.1"],
 };
+// Versions shipped through the current Arm Toolchains repository
+// (https://developer.arm.com/packages/arm-toolchains/ubuntu). Older releases
+// live in the legacy OBS repositories and need the Release.key flow.
+const CURRENT_REPOSITORY_VERSIONS = new Set([
+    "23.1",
+    "22.1",
+]);
 const PACKAGE = "arm-toolchain-for-linux";
 const ARM_ROOT = "/opt/arm";
 const INSTALL_DIR = "/opt/arm/arm-toolchain-for-linux";
@@ -103632,13 +103683,16 @@ const APT_ACQUIRE_OPTS = [
     "DPkg::Lock::Timeout=120",
 ];
 function ubuntuRepository(osVersion) {
+    if (osVersion.includes("26.04") || osVersion.includes("ubuntu26")) {
+        return { release: "26", codename: "resolute" };
+    }
     if (osVersion.includes("24.04") || osVersion.includes("ubuntu24")) {
         return { release: "24", codename: "noble" };
     }
     if (osVersion.includes("22.04") || osVersion.includes("ubuntu22")) {
         return { release: "22", codename: "jammy" };
     }
-    throw new Error(`ArmFlang is only supported on Ubuntu 22.04 and 24.04 (got: ${osVersion}).`);
+    throw new Error(`ArmFlang is only supported on Ubuntu 22.04, 24.04 and 26.04 (got: ${osVersion}).`);
 }
 function debian_computeSha256(filePath) {
     const fileBuffer = external_fs_namespaceObject.readFileSync(filePath);
@@ -103829,6 +103883,13 @@ async function stageInstallationForCache(cacheDir) {
 async function armflang_debian_installDebian(inputs) {
     const version = resolveVersion(inputs, armflang_debian_SUPPORTED_VERSIONS);
     const repository = ubuntuRepository(inputs.osVersion);
+    // Arm publishes no legacy OBS repository for Ubuntu 26.04 (resolute).
+    if (repository.codename === "resolute" &&
+        !CURRENT_REPOSITORY_VERSIONS.has(version)) {
+        throw new Error(`ArmFlang ${version} is not available on Ubuntu 26.04 (resolute): it is ` +
+            `only published in Arm's legacy repositories, which have no resolute ` +
+            `repository. Use an ubuntu-24.04-arm runner or request a newer release.`);
+    }
     const legacyBaseUrl = `https://developer.arm.com/packages/arm-toolchains:ubuntu-${repository.release}` +
         `/${repository.codename}`;
     const keyring = "/usr/share/keyrings/obs-oss-arm-com.gpg";
@@ -103864,14 +103925,6 @@ async function armflang_debian_installDebian(inputs) {
         // unrelated repository must not block this step.
         await armflang_debian_aptGetUpdateWithRetry();
         await aptGetWithRetry(["install", "-y", "curl", "gpg"]);
-        // Versions shipped through the current Arm Toolchains repository
-        // (https://developer.arm.com/packages/arm-toolchains/ubuntu). Older
-        // releases live in the legacy OBS repositories and need the Release.key
-        // flow below.
-        const CURRENT_REPOSITORY_VERSIONS = new Set([
-            "23.1",
-            "22.1",
-        ]);
         if (CURRENT_REPOSITORY_VERSIONS.has(version)) {
             await configureCurrentRepository(repository.codename);
         }
