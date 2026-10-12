@@ -10,18 +10,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {os: windows-2022, compiler: intel, version: '2022.2', expect: 'icx cl'}
-          - {os: windows-2022, compiler: intel, version: '2023.2', expect: 'icx cl'}
-          - {os: windows-2022, compiler: intel, version: '2024.1', expect: 'icx cl'}
-          - {os: windows-2022, compiler: intel, version: '2025.0', expect: 'icx icx'}
-          - {os: windows-2022, compiler: intel, version: '2025.2', expect: 'icx icx'}
-          - {os: windows-2022, compiler: intel, version: '2025.3', expect: 'cl cl'}
-          - {os: windows-2022, compiler: intel, version: '2026.1', expect: 'cl cl'}
-          - {os: windows-2025, compiler: intel, version: '2025.3', expect: 'cl cl'}
-          - {os: windows-2025, compiler: intel, version: '2026.1', expect: 'cl cl'}
-          - {os: windows-2022, compiler: intel-classic, version: '2021.9', expect: 'icl cl'}
-          - {os: windows-2022, compiler: intel-classic, version: '2021.10', expect: 'icl cl'}
-          - {os: windows-2022, compiler: intel-classic, version: '2021.12', expect: 'cl cl'}
+          - {os: windows-2022, compiler: intel, version: '2022.2', expect: 'icx cl', toolchain: {compiler: intel, version: '2022.2'}}
+          - {os: windows-2022, compiler: intel, version: '2023.2', expect: 'icx cl', toolchain: {compiler: intel, version: '2023.2'}}
+          - {os: windows-2022, compiler: intel, version: '2024.1', expect: 'icx cl', toolchain: {compiler: intel, version: '2024.1'}}
+          - {os: windows-2022, compiler: intel, version: '2025.0', expect: 'icx icx', toolchain: {compiler: intel, version: '2025.0'}}
+          - {os: windows-2022, compiler: intel, version: '2025.2', expect: 'icx icx', toolchain: {compiler: intel, version: '2025.2'}}
+          - {os: windows-2022, compiler: intel, version: '2025.3', expect: 'cl cl', toolchain: {compiler: intel, version: '2025.3'}}
+          - {os: windows-2022, compiler: intel, version: '2026.1', expect: 'cl cl', toolchain: {compiler: intel, version: '2026.1'}}
+          - {os: windows-2025, compiler: intel, version: '2025.3', expect: 'cl cl', toolchain: {compiler: intel, version: '2025.3'}}
+          - {os: windows-2025, compiler: intel, version: '2026.1', expect: 'cl cl', toolchain: {compiler: intel, version: '2026.1'}}
+          - {os: windows-2022, compiler: intel-classic, version: '2021.9', expect: 'icl cl', toolchain: {compiler: intel-classic, version: '2021.9'}}
+          - {os: windows-2022, compiler: intel-classic, version: '2021.10', expect: 'icl cl', toolchain: {compiler: intel-classic, version: '2021.10'}}
+          - {os: windows-2022, compiler: intel-classic, version: '2021.12', expect: 'cl cl', toolchain: {compiler: intel-classic, version: '2021.12'}}
     steps:
       - uses: actions/checkout@v7
       - uses: ./
@@ -33,6 +33,18 @@ jobs:
         run: |
           echo "CC=$CC CXX=$CXX FC=$FC FPM_CC=$FPM_CC FPM_CXX=$FPM_CXX"
           [[ "$CC $CXX" == "${{ matrix.expect }}" ]]
+      - name: test-cc action
+        if: success() || failure()
+        uses: ./.github/actions/test-cc
+        with:
+          compiler: ${{ matrix.compiler }}
+          version: ${{ matrix.version }}
+      - name: test-cxx action
+        if: success() || failure()
+        uses: ./.github/actions/test-cxx
+        with:
+          compiler: ${{ matrix.compiler }}
+          version: ${{ matrix.version }}
       - name: CMake C and C++ build
         shell: cmd
         run: |
