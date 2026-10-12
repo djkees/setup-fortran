@@ -9,18 +9,18 @@ permissions:
   actions: read
   contents: read
 
+env:
+  APT_DIR: /home/runner/work/_temp/setup-fortran/apt/gfortran/ubuntu24/x64/16
+
 jobs:
-  seed-x64:
-    name: "seed old-format and other-build entries (11, x64)"
+  seed:
+    name: "seed a longer key with the same start (16, x64)"
     runs-on: ubuntu-24.04
-    env:
-      APT_DIR: /home/runner/work/_temp/setup-fortran/apt/gfortran/ubuntu24/x64/11
-      BASE: apt-gfortran-v2-ubuntu24-x64-11
     steps:
       - id: rev
         run: |
-          sudo apt-get update -y >/dev/null || true
-          rev=$(apt-cache policy gfortran-11 | awk '/Candidate:/{print $2}')
+          sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test >/dev/null
+          rev=$(apt-cache policy gfortran-16 | awk '/Candidate:/{print $2}')
           echo "candidate: $rev"
           echo "rev=$rev" >> "$GITHUB_OUTPUT"
           mkdir -p "$APT_DIR"
@@ -28,162 +28,34 @@ jobs:
       - uses: actions/cache/save@v4
         with:
           path: ${{ env.APT_DIR }}
-          key: ${{ env.BASE }}
-      - uses: actions/cache/save@v4
-        with:
-          path: ${{ env.APT_DIR }}
-          key: ${{ env.BASE }}-0.0.0-0stale
-
-  miss-11:
-    name: "1/3/4: first run, 11 x64 (expect miss + save)"
-    runs-on: ubuntu-24.04
-    needs: [seed-x64]
-    env:
-      ARCH: x64
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./
-        with:
-          compiler: gfortran
-          version: "11"
-      - if: always()
-        run: |
-          apt-cache policy gfortran-11 | head -3
-          ls -la "$RUNNER_TEMP/setup-fortran/apt/gfortran/ubuntu24/$ARCH/11" | head -20
-
-  hit-11:
-    name: "2: second run, 11 x64 (expect hit)"
-    runs-on: ubuntu-24.04
-    needs: [miss-11]
-    env:
-      ARCH: x64
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./
-        with:
-          compiler: gfortran
-          version: "11"
-      - if: always()
-        run: |
-          apt-cache policy gfortran-11 | head -3
-          ls -la "$RUNNER_TEMP/setup-fortran/apt/gfortran/ubuntu24/$ARCH/11" | head -20
-
-  seed-arm:
-    name: "seed a longer key with the same start (11, arm64)"
-    runs-on: ubuntu-24.04-arm
-    env:
-      APT_DIR: /home/runner/work/_temp/setup-fortran/apt/gfortran/ubuntu24/arm64/11
-      BASE: apt-gfortran-v2-ubuntu24-arm64-11
-    steps:
-      - id: rev
-        run: |
-          sudo apt-get update -y >/dev/null || true
-          rev=$(apt-cache policy gfortran-11 | awk '/Candidate:/{print $2}')
-          echo "candidate: $rev"
-          echo "rev=$rev" >> "$GITHUB_OUTPUT"
-          mkdir -p "$APT_DIR"
-          echo "not the packages apt wants" > "$APT_DIR/stale-marker.txt"
-      - uses: actions/cache/save@v4
-        with:
-          path: ${{ env.APT_DIR }}
-          key: ${{ env.BASE }}-${{ steps.rev.outputs.rev }}.stale
+          key: apt-gfortran-v2-ubuntu24-x64-16-${{ steps.rev.outputs.rev }}.stale
 
   prefix-first:
-    name: "5: first run, 11 arm64 (expect no hit on longer key)"
-    runs-on: ubuntu-24.04-arm
-    needs: [seed-arm]
-    env:
-      ARCH: arm64
+    name: "5: first run, 16 x64 (expect no hit on longer key)"
+    runs-on: ubuntu-24.04
+    needs: [seed]
     steps:
       - uses: actions/checkout@v7
       - uses: ./
         with:
           compiler: gfortran
-          version: "11"
+          version: "16"
       - if: always()
         run: |
-          apt-cache policy gfortran-11 | head -3
-          ls -la "$RUNNER_TEMP/setup-fortran/apt/gfortran/ubuntu24/$ARCH/11" | head -20
+          apt-cache policy gfortran-16 | head -3
+          ls -la "$APT_DIR" | head -8
 
   prefix-second:
-    name: "5: second run, 11 arm64 (expect hit)"
-    runs-on: ubuntu-24.04-arm
+    name: "5: second run, 16 x64 (expect hit)"
+    runs-on: ubuntu-24.04
     needs: [prefix-first]
-    env:
-      ARCH: arm64
     steps:
       - uses: actions/checkout@v7
       - uses: ./
         with:
           compiler: gfortran
-          version: "11"
+          version: "16"
       - if: always()
         run: |
-          apt-cache policy gfortran-11 | head -3
-          ls -la "$RUNNER_TEMP/setup-fortran/apt/gfortran/ubuntu24/$ARCH/11" | head -20
-
-  pre-first:
-    name: "6: first run, preinstalled 13 x64"
-    runs-on: ubuntu-24.04
-    env:
-      ARCH: x64
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./
-        with:
-          compiler: gfortran
-          version: "13"
-      - if: always()
-        run: |
-          apt-cache policy gfortran-13 | head -3
-          ls -la "$RUNNER_TEMP/setup-fortran/apt/gfortran/ubuntu24/$ARCH/13" | head -20
-
-  pre-second:
-    name: "6: second run, preinstalled 13 x64"
-    runs-on: ubuntu-24.04
-    needs: [pre-first]
-    env:
-      ARCH: x64
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./
-        with:
-          compiler: gfortran
-          version: "13"
-      - if: always()
-        run: |
-          apt-cache policy gfortran-13 | head -3
-          ls -la "$RUNNER_TEMP/setup-fortran/apt/gfortran/ubuntu24/$ARCH/13" | head -20
-
-  ppa-first:
-    name: "7: first run, PPA 15 x64"
-    runs-on: ubuntu-24.04
-    env:
-      ARCH: x64
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./
-        with:
-          compiler: gfortran
-          version: "15"
-      - if: always()
-        run: |
-          apt-cache policy gfortran-15 | head -3
-          ls -la "$RUNNER_TEMP/setup-fortran/apt/gfortran/ubuntu24/$ARCH/15" | head -20
-
-  ppa-second:
-    name: "7: second run, PPA 15 x64"
-    runs-on: ubuntu-24.04
-    needs: [ppa-first]
-    env:
-      ARCH: x64
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./
-        with:
-          compiler: gfortran
-          version: "15"
-      - if: always()
-        run: |
-          apt-cache policy gfortran-15 | head -3
-          ls -la "$RUNNER_TEMP/setup-fortran/apt/gfortran/ubuntu24/$ARCH/15" | head -20
+          apt-cache policy gfortran-16 | head -3
+          ls -la "$APT_DIR" | head -8
