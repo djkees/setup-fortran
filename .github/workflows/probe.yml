@@ -1,0 +1,55 @@
+name: Probe
+on:
+  push:
+    branches:
+      - probe/win-intel-icx-249
+jobs:
+  probe:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: windows-2022, compiler: intel, version: '2022.1'}
+          - {os: windows-2022, compiler: intel, version: '2022.2'}
+          - {os: windows-2022, compiler: intel, version: '2023.1'}
+          - {os: windows-2022, compiler: intel, version: '2023.2'}
+          - {os: windows-2022, compiler: intel, version: '2024.0'}
+          - {os: windows-2022, compiler: intel, version: '2024.1'}
+          - {os: windows-2022, compiler: intel, version: '2025.0'}
+          - {os: windows-2022, compiler: intel, version: '2025.2'}
+          - {os: windows-2022, compiler: intel, version: '2025.3'}
+          - {os: windows-2022, compiler: intel, version: '2026.0'}
+          - {os: windows-2022, compiler: intel, version: '2026.1'}
+          - {os: windows-2025, compiler: intel, version: '2025.3'}
+          - {os: windows-2025, compiler: intel, version: '2026.1'}
+          - {os: windows-2022, compiler: intel-classic, version: '2021.9'}
+          - {os: windows-2022, compiler: intel-classic, version: '2021.10'}
+          - {os: windows-2022, compiler: intel-classic, version: '2021.12'}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./
+        with:
+          compiler: ${{ matrix.compiler }}
+          version: ${{ matrix.version }}
+      - name: Probe
+        shell: cmd
+        continue-on-error: true
+        run: |
+          echo PROBE %RUNNER_OS% ${{ matrix.compiler }} ${{ matrix.version }}
+          echo CC=%CC% CXX=%CXX% FC=%FC%
+          where icx icpx icl cl clang
+          dir /s /b "%ONEAPI_ROOT%\clang.exe" 2>nul
+          echo ---- icx --version
+          icx --version
+          echo ---- icx compile hw.c
+          icx test\hw.c -o hw_icx.exe && hw_icx.exe && echo RESULT_ICX=OK
+          echo ---- icx compile hw.cpp
+          icx test\hw.cpp -o hw_icxpp.exe && hw_icxpp.exe && echo RESULT_ICXPP=OK
+          echo ---- icl compile hw.c
+          icl test\hw.c /Fehw_icl.exe && hw_icl.exe && echo RESULT_ICL=OK
+          echo ---- cl compile hw.c
+          cl test\hw.c /Fehw_cl.exe && hw_cl.exe && echo RESULT_CL=OK
+          echo ---- cl compile hw.cpp
+          cl test\hw.cpp /Fehw_clpp.exe && hw_clpp.exe && echo RESULT_CLPP=OK
+          exit 0
