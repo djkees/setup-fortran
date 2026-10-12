@@ -10,21 +10,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {os: windows-2022, compiler: intel, version: '2022.1'}
           - {os: windows-2022, compiler: intel, version: '2022.2'}
-          - {os: windows-2022, compiler: intel, version: '2023.1'}
           - {os: windows-2022, compiler: intel, version: '2023.2'}
-          - {os: windows-2022, compiler: intel, version: '2024.0'}
           - {os: windows-2022, compiler: intel, version: '2024.1'}
           - {os: windows-2022, compiler: intel, version: '2025.0'}
           - {os: windows-2022, compiler: intel, version: '2025.2'}
-          - {os: windows-2022, compiler: intel, version: '2025.3'}
-          - {os: windows-2022, compiler: intel, version: '2026.0'}
-          - {os: windows-2022, compiler: intel, version: '2026.1'}
-          - {os: windows-2025, compiler: intel, version: '2025.3'}
-          - {os: windows-2025, compiler: intel, version: '2026.1'}
+          - {os: windows-2025, compiler: intel, version: '2022.2'}
+          - {os: windows-2025, compiler: intel, version: '2023.2'}
+          - {os: windows-2025, compiler: intel, version: '2024.1'}
+          - {os: windows-2025, compiler: intel, version: '2025.0'}
+          - {os: windows-2025, compiler: intel, version: '2025.2'}
+          - {os: windows-2025-vs2026, compiler: intel, version: '2024.1'}
+          - {os: windows-2025-vs2026, compiler: intel, version: '2025.2'}
+          - {os: windows-2025-vs2026, compiler: intel, version: '2026.1'}
           - {os: windows-2022, compiler: intel-classic, version: '2021.9'}
-          - {os: windows-2022, compiler: intel-classic, version: '2021.10'}
           - {os: windows-2022, compiler: intel-classic, version: '2021.12'}
     steps:
       - uses: actions/checkout@v7
@@ -36,20 +35,35 @@ jobs:
         shell: cmd
         continue-on-error: true
         run: |
-          echo PROBE %RUNNER_OS% ${{ matrix.compiler }} ${{ matrix.version }}
+          echo PROBE %RUNNER_OS% ${{ matrix.os }} ${{ matrix.compiler }} ${{ matrix.version }}
           echo CC=%CC% CXX=%CXX% FC=%FC%
-          where icx icpx icl cl clang
-          dir /s /b "%ONEAPI_ROOT%\clang.exe" 2>nul
-          echo ---- icx --version
-          icx --version
-          echo ---- icx compile hw.c
-          icx test\hw.c -o hw_icx.exe && hw_icx.exe && echo RESULT_ICX=OK
-          echo ---- icx compile hw.cpp
-          icx test\hw.cpp -o hw_icxpp.exe && hw_icxpp.exe && echo RESULT_ICXPP=OK
-          echo ---- icl compile hw.c
-          icl test\hw.c /Fehw_icl.exe && hw_icl.exe && echo RESULT_ICL=OK
-          echo ---- cl compile hw.c
-          cl test\hw.c /Fehw_cl.exe && hw_cl.exe && echo RESULT_CL=OK
-          echo ---- cl compile hw.cpp
-          cl test\hw.cpp /Fehw_clpp.exe && hw_clpp.exe && echo RESULT_CLPP=OK
+          echo ---- MSVC toolsets
+          dir /b "%VCINSTALLDIR%Tools\MSVC"
+          echo VCToolsVersion=%VCToolsVersion%
+          echo ---- where
+          where icx icpx icl cl
+          echo ---- icx version
+          icx --version | findstr /i "Version Target"
+          echo ---- nostl.cpp
+          echo #include ^<stdio.h^> > nostl.cpp
+          echo int main(){printf("hi\n");return 0;} >> nostl.cpp
+          echo ---- T1 icx hw.cpp
+          icx test\hw.cpp -o t1.exe && t1.exe && echo RESULT_T1_icx_iostream=OK
+          echo ---- T2 icpx hw.cpp
+          icpx test\hw.cpp -o t2.exe && t2.exe && echo RESULT_T2_icpx_iostream=OK
+          echo ---- T3 icx nostl.cpp
+          icx nostl.cpp -o t3.exe && t3.exe && echo RESULT_T3_icx_nostl=OK
+          echo ---- T4 icx hw.cpp with mismatch define
+          icx -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH test\hw.cpp -o t4.exe && t4.exe && echo RESULT_T4_icx_iostream_define=OK
+          echo ---- T5 icl hw.cpp
+          icl test\hw.cpp /Fet5.exe && t5.exe && echo RESULT_T5_icl_iostream=OK
+          echo ---- T6 cl hw.cpp
+          cl test\hw.cpp /EHsc /Fet6.exe && t6.exe && echo RESULT_T6_cl_iostream=OK
+          echo ---- T7 cmake ninja with env CC/CXX
+          mkdir cm
+          echo cmake_minimum_required(VERSION 3.20) > cm\CMakeLists.txt
+          echo project(p C CXX) >> cm\CMakeLists.txt
+          echo add_executable(c ../test/hw.c) >> cm\CMakeLists.txt
+          echo add_executable(x ../test/hw.cpp) >> cm\CMakeLists.txt
+          cmake -S cm -B cmb -G Ninja && cmake --build cmb && echo RESULT_T7_cmake=OK
           exit 0
