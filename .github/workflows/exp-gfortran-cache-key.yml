@@ -10,17 +10,17 @@ permissions:
   contents: read
 
 env:
-  APT_DIR: /home/runner/work/_temp/setup-fortran/apt/gfortran/ubuntu24/x64/16
+  APT_DIR: /home/runner/work/_temp/setup-fortran/apt/gfortran/ubuntu24/x64/11
 
 jobs:
   seed:
-    name: "seed a longer key with the same start (16, x64)"
+    name: "seed an entry for a longer build string (11, x64)"
     runs-on: ubuntu-24.04
     steps:
       - id: rev
         run: |
-          sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test >/dev/null
-          rev=$(apt-cache policy gfortran-16 | awk '/Candidate:/{print $2}')
+          sudo apt-get update -y >/dev/null || true
+          rev=$(apt-cache policy gfortran-11 | awk '/Candidate:/{print $2}')
           echo "candidate: $rev"
           echo "rev=$rev" >> "$GITHUB_OUTPUT"
           mkdir -p "$APT_DIR"
@@ -28,10 +28,10 @@ jobs:
       - uses: actions/cache/save@v4
         with:
           path: ${{ env.APT_DIR }}
-          key: apt-gfortran-v2-ubuntu24-x64-16-${{ steps.rev.outputs.rev }}.stale
+          key: apt-gfortran-v2-${{ steps.rev.outputs.rev }}.1-ubuntu24-x64-11
 
-  prefix-first:
-    name: "5: first run, 16 x64 (expect no hit on longer key)"
+  first:
+    name: "5: first run, 11 x64 (expect plain miss + save)"
     runs-on: ubuntu-24.04
     needs: [seed]
     steps:
@@ -39,23 +39,23 @@ jobs:
       - uses: ./
         with:
           compiler: gfortran
-          version: "16"
+          version: "11"
       - if: always()
         run: |
-          apt-cache policy gfortran-16 | head -3
-          ls -la "$APT_DIR" | head -8
+          apt-cache policy gfortran-11 | head -3
+          ls -la "$APT_DIR"
 
-  prefix-second:
-    name: "5: second run, 16 x64 (expect hit)"
+  second:
+    name: "5: second run, 11 x64 (expect hit)"
     runs-on: ubuntu-24.04
-    needs: [prefix-first]
+    needs: [first]
     steps:
       - uses: actions/checkout@v7
       - uses: ./
         with:
           compiler: gfortran
-          version: "16"
+          version: "11"
       - if: always()
         run: |
-          apt-cache policy gfortran-16 | head -3
-          ls -la "$APT_DIR" | head -8
+          apt-cache policy gfortran-11 | head -3
+          ls -la "$APT_DIR"
