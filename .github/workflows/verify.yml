@@ -45,3 +45,46 @@ jobs:
           cmake --build cmb || exit /b 1
           cmb\c.exe || exit /b 1
           cmb\x.exe || exit /b 1
+      - name: Write mixed-language project
+        shell: bash
+        run: |
+          mkdir mixed
+          cat > mixed/c_part.c <<'SRC'
+          int c_add(int a, int b) { return a + b; }
+          SRC
+          cat > mixed/cxx_part.cpp <<'SRC'
+          #include <iostream>
+          extern "C" int cxx_mul(int a, int b) { std::cout << "cxx says hi" << std::endl; return a * b; }
+          SRC
+          cat > mixed/main.f90 <<'SRC'
+          program main
+            use iso_c_binding, only: c_int
+            implicit none
+            interface
+              function c_add(a, b) bind(c, name='c_add') result(r)
+                import :: c_int
+                integer(c_int), value :: a, b
+                integer(c_int) :: r
+              end function
+              function cxx_mul(a, b) bind(c, name='cxx_mul') result(r)
+                import :: c_int
+                integer(c_int), value :: a, b
+                integer(c_int) :: r
+              end function
+            end interface
+            print '(a,i0,a,i0)', 'MIXED_RESULT ', c_add(2, 3), ' ', cxx_mul(4, 5)
+          end program
+          SRC
+          cat > mixed/CMakeLists.txt <<'SRC'
+          cmake_minimum_required(VERSION 3.20)
+          project(mixed C CXX Fortran)
+          add_executable(mixed main.f90 c_part.c cxx_part.cpp)
+          SRC
+      - name: CMake mixed Fortran/C/C++ build
+        shell: cmd
+        run: |
+          cmake -S mixed -B mixedb -G Ninja || exit /b 1
+          cmake --build mixedb || exit /b 1
+          mixedb\mixed.exe > mixed_out.txt || exit /b 1
+          type mixed_out.txt
+          findstr /c:"MIXED_RESULT 5 20" mixed_out.txt || exit /b 1
