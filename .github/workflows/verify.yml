@@ -1,0 +1,47 @@
+name: Verify
+on:
+  push:
+    branches:
+      - verify/win-intel-cc-249
+jobs:
+  verify:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: windows-2022, compiler: intel, version: '2022.2', expect: 'icx cl'}
+          - {os: windows-2022, compiler: intel, version: '2023.2', expect: 'icx cl'}
+          - {os: windows-2022, compiler: intel, version: '2024.1', expect: 'icx cl'}
+          - {os: windows-2022, compiler: intel, version: '2025.0', expect: 'icx icx'}
+          - {os: windows-2022, compiler: intel, version: '2025.2', expect: 'icx icx'}
+          - {os: windows-2022, compiler: intel, version: '2025.3', expect: 'cl cl'}
+          - {os: windows-2022, compiler: intel, version: '2026.1', expect: 'cl cl'}
+          - {os: windows-2025, compiler: intel, version: '2025.3', expect: 'cl cl'}
+          - {os: windows-2025, compiler: intel, version: '2026.1', expect: 'cl cl'}
+          - {os: windows-2022, compiler: intel-classic, version: '2021.9', expect: 'icl cl'}
+          - {os: windows-2022, compiler: intel-classic, version: '2021.10', expect: 'icl cl'}
+          - {os: windows-2022, compiler: intel-classic, version: '2021.12', expect: 'cl cl'}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./
+        with:
+          compiler: ${{ matrix.compiler }}
+          version: ${{ matrix.version }}
+      - name: Check CC/CXX
+        shell: bash
+        run: |
+          echo "CC=$CC CXX=$CXX FC=$FC FPM_CC=$FPM_CC FPM_CXX=$FPM_CXX"
+          [[ "$CC $CXX" == "${{ matrix.expect }}" ]]
+      - name: CMake C and C++ build
+        shell: cmd
+        run: |
+          mkdir cm
+          echo cmake_minimum_required(VERSION 3.20) > cm\CMakeLists.txt
+          echo project(p C CXX) >> cm\CMakeLists.txt
+          echo add_executable(c ../test/hw.c) >> cm\CMakeLists.txt
+          echo add_executable(x ../test/hw.cpp) >> cm\CMakeLists.txt
+          cmake -S cm -B cmb -G Ninja || exit /b 1
+          cmake --build cmb || exit /b 1
+          cmb\c.exe || exit /b 1
+          cmb\x.exe || exit /b 1
