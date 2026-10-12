@@ -9,17 +9,46 @@ permissions:
   actions: read
   contents: read
 
+env:
+  # Same key and path the action builds for gfortran 11 on ubuntu-24.04 x64.
+  APT_KEY: apt-gfortran-v2-ubuntu24-x64-11
+  APT_DIR: /home/runner/work/_temp/setup-fortran/apt/gfortran/ubuntu24/x64/11
+
 jobs:
-  # Second pass: the first pass's ifort 2021.13 entry disappeared before its
-  # restore jobs ran, so repeat with a version whose key is not in the cache.
-  intel:
-    name: ${{ matrix.compiler }} ${{ matrix.version }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { compiler: ifort, version: "2021.12" }
-    uses: ./.github/workflows/exp-intel-pair.yml
-    with:
-      compiler: ${{ matrix.compiler }}
-      version: ${{ matrix.version }}
+  # Third pass: does a gfortran apt entry whose files no longer match what apt
+  # wants ever get replaced? Seed such an entry, then run the action twice.
+  seed:
+    name: seed a stale gfortran entry
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          mkdir -p "$APT_DIR"
+          echo "not the packages apt wants" > "$APT_DIR/stale-marker.txt"
+      - uses: actions/cache/save@v4
+        with:
+          path: ${{ env.APT_DIR }}
+          key: ${{ env.APT_KEY }}
+
+  first:
+    name: first run with the stale entry
+    needs: [seed]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./
+        with:
+          compiler: gfortran
+          version: "11"
+      - run: ls -la "$APT_DIR" | head -20
+
+  second:
+    name: second run (was the entry replaced?)
+    needs: [first]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./
+        with:
+          compiler: gfortran
+          version: "11"
+      - run: ls -la "$APT_DIR" | head -20
