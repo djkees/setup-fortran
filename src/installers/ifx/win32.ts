@@ -11,12 +11,13 @@ import {
 import { resolveWindowsVersion } from "../../resolve_version";
 import * as fs from "fs";
 import path from "path";
-import { captureIntelWindowsEnvironment } from "../../intel_windows_env";
-import { verifyIntelAuthenticode } from "../../verify_download";
 import {
-  saveCompilerCache,
-  validateRestoredCompilerCache,
-} from "../../cache_validation";
+  captureIntelWindowsEnvironment,
+  validateRestoredIntelWindowsCache,
+} from "../../intel_windows_env";
+import { fortranComponentArgs } from "../../intel_windows_installer";
+import { verifyIntelAuthenticode } from "../../verify_download";
+import { saveCompilerCache } from "../../cache_validation";
 
 // Only versions with a known installer URL are listed.
 // LATEST resolves to the first entry.
@@ -132,13 +133,6 @@ export const SUPPORTED_VERSIONS = {
   },
 } satisfies Record<Arch, Record<Msystem, readonly string[] | undefined>>;
 
-const LEGACY_KIT_VERSIONS = new Set([
-  "2022.2.0",
-  "2022.3.0",
-  "2023.1.0",
-  "2023.2.0",
-]);
-
 const ONEAPI_ROOT = "C:\\Program Files (x86)\\Intel\\oneAPI";
 const SETVARS_BAT = `${ONEAPI_ROOT}\\setvars.bat`;
 
@@ -186,16 +180,10 @@ export async function installWin32(
   }
 
   const cacheValid = cacheHit
-    ? await validateRestoredCompilerCache(
+    ? await validateRestoredIntelWindowsCache(
         `ifx ${version}`,
-        [SETVARS_BAT],
-        "cmd",
-        [
-          "/D",
-          "/S",
-          "/C",
-          `call "${SETVARS_BAT}" --force >nul && ifx --version >nul`,
-        ],
+        SETVARS_BAT,
+        "ifx",
       )
     : false;
 
@@ -218,14 +206,12 @@ export async function installWin32(
     await verifyIntelAuthenticode(installerPath);
 
     core.info("Running silent install...");
-    const extraArgs: string[] = [];
-    if (supportsComponentFilter(version, release.url)) {
-      const componentId = await resolveFortranComponentId(installerPath);
-      if (componentId) {
-        extraArgs.push(`--components=${componentId}`);
-      }
-    }
-    await runInstallerWithRetry(installerPath, extraArgs);
+    const componentArgs = await fortranComponentArgs(
+      installerPath,
+      version,
+      release.url,
+    );
+    await runInstallerWithRetry(installerPath, componentArgs);
 
     core.info("Saving installation to cache...");
     await saveCompilerCache(cachePaths, cacheKey);
@@ -279,42 +265,6 @@ async function downloadToolWithRetry(
   }
 
   throw lastError;
-}
-
-function isFullKitInstaller(url: string): boolean {
-  return /hpckit|hpc-toolkit/i.test(url);
-}
-
-function supportsComponentFilter(version: string, url: string): boolean {
-  return isFullKitInstaller(url) && !LEGACY_KIT_VERSIONS.has(version);
-}
-
-async function resolveFortranComponentId(
-  installerPath: string,
-): Promise<string | undefined> {
-  let output = "";
-  await exec.exec(`"${installerPath}"`, ["-s", "-a", "--list-components"], {
-    listeners: {
-      stdout: (data: Buffer) => {
-        output += data.toString();
-      },
-    },
-  });
-
-  const line = output.split("\n").find((l) => /ifort-compiler/i.test(l));
-  if (!line) {
-    core.info(
-      "This installer doesn't expose the Fortran compiler as a separately " +
-        "installable component; installing the full kit instead.",
-    );
-    return undefined;
-  }
-
-  const id = line.trim().split(/\s+/)[0];
-  if (!id) {
-    throw new Error(`Failed to parse component ID from line: "${line}"`);
-  }
-  return id;
 }
 
 async function runInstallerWithRetry(

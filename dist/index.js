@@ -98382,6 +98382,7 @@ function indexFetchFailed(output, repositoryHost) {
 
 
 
+
 // Make sure the versions are always in descending order. The first one will be
 // used as the default if no version was specified by the user.
 const SUPPORTED_VERSIONS = {
@@ -98429,12 +98430,13 @@ async function installDebian(inputs) {
         await addAptRepositoryWithRetry("ppa:ubuntu-toolchain-r/test");
     }
     await aptGetUpdateWithRetry(ppaAdded);
-    const revision = await candidateVersion(`gfortran-${version}`);
-    const cacheKey = revision
-        ? aptCacheKey(inputs, version, revision)
-        : undefined;
     // APT expects this directory to exist beneath its archive directory.
     external_fs_namespaceObject.mkdirSync(external_path_namespaceObject.join(cacheDir, "partial"), { recursive: true });
+    const revision = await candidateVersion(`gfortran-${version}`);
+    const fingerprint = await downloadFingerprint(packages, cacheDir);
+    const cacheKey = revision && fingerprint
+        ? aptCacheKey(inputs, version, `${revision}-${fingerprint}`)
+        : undefined;
     let cacheHit;
     if (cacheKey) {
         try {
@@ -98445,7 +98447,7 @@ async function installDebian(inputs) {
         }
     }
     else {
-        info(`Could not determine the candidate version of gfortran-${version}; skipping the package cache.`);
+        info(`Could not determine the GFortran ${version} packages to download; skipping the package cache.`);
     }
     if (cacheHit) {
         info(`Cache hit for ${cacheHit}, installing from cache...`);
@@ -98593,6 +98595,33 @@ async function candidateVersion(pkg) {
         return undefined;
     const candidate = /^\s*Candidate:\s*(\S+)/m.exec(output)?.[1];
     return candidate === "(none)" ? undefined : candidate;
+}
+async function downloadFingerprint(packages, cacheDir) {
+    let output = "";
+    const exitCode = await exec_exec("sudo", [
+        "apt-get",
+        "install",
+        "-y",
+        "-qq",
+        "--print-uris",
+        ...aptCacheOptions(cacheDir),
+        ...packages,
+    ], {
+        ignoreReturnCode: true,
+        silent: true,
+        listeners: {
+            stdout: (data) => {
+                output += data.toString();
+            },
+        },
+    });
+    if (exitCode !== 0)
+        return undefined;
+    const files = [...output.matchAll(/^'[^']*'\s+(\S+)/gm)].map((m) => m[1]);
+    return external_crypto_namespaceObject.createHash("sha256")
+        .update(files.sort().join("\n"))
+        .digest("hex")
+        .slice(0, 8);
 }
 async function aptGetInstallFromCache(packages, cacheDir) {
     await exec_exec("sudo", [
@@ -99881,12 +99910,19 @@ async function validateRestoredCompilerCache(label, requiredPaths, command, args
         return false;
     }
     try {
+        let output = "";
+        const append = (data) => {
+            output += data.toString();
+        };
         const exitCode = await exec_exec(command, args, {
             ignoreReturnCode: true,
             silent: true,
+            listeners: { stdout: append, stderr: append },
         });
         if (exitCode === 0)
             return true;
+        if (output.trim())
+            info(output.trim());
         info(`Restored ${label} cache failed compiler validation with exit code ${exitCode.toString()}. Reinstalling.`);
     }
     catch (error) {
@@ -100207,14 +100243,10 @@ function addIntelCompilerBinFromPath(pathValue) {
 
 
 
+
 const CAPTURED_ENV_KEY_PATTERN = /^(PATH|LIB|INCLUDE|.*INTEL.*|.*ONEAPI.*|.*MKL.*|MKLROOT|CMPLR_ROOT)$/i;
-/**
- * Runs vcvars64.bat, then Intel's setvars.bat, and exports the combined
- * environment so ifx/ifort can link against MSVC. Shared by both installers.
- */
-async function captureIntelWindowsEnvironment(setvarsBat, batchFileName) {
-    const batFile = external_path_default().win32.join(external_os_.tmpdir(), batchFileName);
-    external_fs_namespaceObject.writeFileSync(batFile, [
+function intelEnvironmentBatchLines(setvarsBat) {
+    return [
         `@echo off`,
         `:: 1. Find MSVC Installation Path via vswhere`,
         `for /f "usebackq tokens=*" %%i in (\`"%ProgramFiles(x86)%\\Microsoft Visual Studio\\Installer\\vswhere.exe" -latest -property installationPath\`) do set VS_INSTALL_DIR=%%i`,
@@ -100222,6 +100254,24 @@ async function captureIntelWindowsEnvironment(setvarsBat, batchFileName) {
         `if exist "%VS_INSTALL_DIR%\\VC\\Auxiliary\\Build\\vcvars64.bat" call "%VS_INSTALL_DIR%\\VC\\Auxiliary\\Build\\vcvars64.bat"`,
         `:: 3. Call Intel's setvars.bat (it will detect MSVC is already active)`,
         `call "${setvarsBat}" --force`,
+    ];
+}
+async function validateRestoredIntelWindowsCache(label, setvarsBat, compiler) {
+    const batFile = external_path_default().win32.join(external_os_.tmpdir(), `validate_${compiler}.bat`);
+    external_fs_namespaceObject.writeFileSync(batFile, [...intelEnvironmentBatchLines(setvarsBat), `${compiler} /QV`].join("\r\n"));
+    return validateRestoredCompilerCache(label, [setvarsBat], "cmd", [
+        "/C",
+        batFile,
+    ]);
+}
+/**
+ * Runs vcvars64.bat, then Intel's setvars.bat, and exports the combined
+ * environment so ifx/ifort can link against MSVC. Shared by both installers.
+ */
+async function captureIntelWindowsEnvironment(setvarsBat, batchFileName) {
+    const batFile = external_path_default().win32.join(external_os_.tmpdir(), batchFileName);
+    external_fs_namespaceObject.writeFileSync(batFile, [
+        ...intelEnvironmentBatchLines(setvarsBat),
         `:: 4. Dump the fully combined environment`,
         `set`,
     ].join("\r\n"));
@@ -100269,7 +100319,60 @@ async function captureIntelWindowsEnvironment(setvarsBat, batchFileName) {
     }
 }
 
+;// CONCATENATED MODULE: ./src/intel_windows_installer.ts
+
+
+// Older oneAPI bootstrappers choke on --components, so they install in full.
+const KITS_WITHOUT_COMPONENT_FILTER = new Set([
+    "2022.2.0",
+    "2022.3.0",
+    "2023.1.0",
+    "2023.2.0",
+]);
+// HPC kits bundle MPI, TBB, debuggers and Inspector/ITAC, none of which this
+// action exposes. Taking only the Fortran component shrinks the installation
+// and its cached copy several times over. The Fortran-only packages are already
+// minimal, so there is nothing to prune there.
+function isFullKitInstaller(url) {
+    return /hpckit|hpc-toolkit/i.test(url);
+}
+function supportsComponentFilter(oneApiRelease, url) {
+    return (isFullKitInstaller(url) && !KITS_WITHOUT_COMPONENT_FILTER.has(oneApiRelease));
+}
+async function resolveFortranComponentId(installerPath) {
+    let output = "";
+    await exec_exec(`"${installerPath}"`, ["-s", "-a", "--list-components"], {
+        listeners: {
+            stdout: (data) => {
+                output += data.toString();
+            },
+        },
+    });
+    const line = output.split("\n").find((l) => /ifort-compiler/i.test(l));
+    if (!line) {
+        info("This installer doesn't expose the Fortran compiler as a separately " +
+            "installable component; installing the full kit instead.");
+        return undefined;
+    }
+    const id = line.trim().split(/\s+/)[0];
+    if (!id) {
+        throw new Error(`Failed to parse component ID from line: "${line}"`);
+    }
+    return id;
+}
+// Installer arguments restricting an HPC kit to its Fortran component; empty
+// for every other installer. `oneApiRelease` is the oneAPI release the
+// installer ships, which the callers source differently: ifort from its
+// installer filename, ifx from its release table.
+async function fortranComponentArgs(installerPath, oneApiRelease, url) {
+    if (!supportsComponentFilter(oneApiRelease, url))
+        return [];
+    const componentId = await resolveFortranComponentId(installerPath);
+    return componentId ? [`--components=${componentId}`] : [];
+}
+
 ;// CONCATENATED MODULE: ./src/installers/ifx/win32.ts
+
 
 
 
@@ -100393,12 +100496,6 @@ const ifx_win32_SUPPORTED_VERSIONS = {
         [Msystem.Clang64]: undefined,
     },
 };
-const LEGACY_KIT_VERSIONS = new Set([
-    "2022.2.0",
-    "2022.3.0",
-    "2023.1.0",
-    "2023.2.0",
-]);
 const ONEAPI_ROOT = "C:\\Program Files (x86)\\Intel\\oneAPI";
 const SETVARS_BAT = `${ONEAPI_ROOT}\\setvars.bat`;
 async function win32_installWin32(inputs) {
@@ -100432,12 +100529,7 @@ async function win32_installWin32(inputs) {
         }
     }
     const cacheValid = cacheHit
-        ? await validateRestoredCompilerCache(`ifx ${version}`, [SETVARS_BAT], "cmd", [
-            "/D",
-            "/S",
-            "/C",
-            `call "${SETVARS_BAT}" --force >nul && ifx --version >nul`,
-        ])
+        ? await validateRestoredIntelWindowsCache(`ifx ${version}`, SETVARS_BAT, "ifx")
         : false;
     if (cacheValid) {
         info(`Restored ifx installation from cache (${cacheHit ?? cacheKey}).`);
@@ -100450,14 +100542,8 @@ async function win32_installWin32(inputs) {
         info("Verifying installer...");
         await verifyIntelAuthenticode(installerPath);
         info("Running silent install...");
-        const extraArgs = [];
-        if (supportsComponentFilter(version, release.url)) {
-            const componentId = await resolveFortranComponentId(installerPath);
-            if (componentId) {
-                extraArgs.push(`--components=${componentId}`);
-            }
-        }
-        await runInstallerWithRetry(installerPath, extraArgs);
+        const componentArgs = await fortranComponentArgs(installerPath, version, release.url);
+        await runInstallerWithRetry(installerPath, componentArgs);
         info("Saving installation to cache...");
         await saveCompilerCache(cachePaths, cacheKey);
     }
@@ -100496,33 +100582,6 @@ async function win32_downloadToolWithRetry(url, destination, maxAttempts = 3) {
         }
     }
     throw lastError;
-}
-function isFullKitInstaller(url) {
-    return /hpckit|hpc-toolkit/i.test(url);
-}
-function supportsComponentFilter(version, url) {
-    return isFullKitInstaller(url) && !LEGACY_KIT_VERSIONS.has(version);
-}
-async function resolveFortranComponentId(installerPath) {
-    let output = "";
-    await exec_exec(`"${installerPath}"`, ["-s", "-a", "--list-components"], {
-        listeners: {
-            stdout: (data) => {
-                output += data.toString();
-            },
-        },
-    });
-    const line = output.split("\n").find((l) => /ifort-compiler/i.test(l));
-    if (!line) {
-        info("This installer doesn't expose the Fortran compiler as a separately " +
-            "installable component; installing the full kit instead.");
-        return undefined;
-    }
-    const id = line.trim().split(/\s+/)[0];
-    if (!id) {
-        throw new Error(`Failed to parse component ID from line: "${line}"`);
-    }
-    return id;
 }
 async function runInstallerWithRetry(installerPath, extraArgs = [], maxAttempts = 3) {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -101299,36 +101358,48 @@ async function ifort_darwin_resolveInstalledVersion() {
 
 
 
+
 // ifort (Intel Fortran Compiler Classic) was discontinued in 2024.
 // Only legacy versions (2023 and earlier) are listed here.
 // LATEST resolves to the first entry
+//
+// `bundle` is the oneAPI release the installer ships, as named in its filename.
+// It gates component selection and can differ from the apt bundle in debian.ts
+// for the same ifort version.
 const win32_IFORT_RELEASES = [
     {
         version: "2021.13",
+        bundle: "2024.2.1",
         url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/ea23d696-a77f-4a4a-8996-20d02cdbc48f/w_fortran-compiler_p_2024.2.1.81_offline.exe",
     },
     {
         version: "2021.12",
+        bundle: "2024.1.0",
         url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/c95a3b26-fc45-496c-833b-df08b10297b9/w_HPCKit_p_2024.1.0.561_offline.exe",
     },
     {
         version: "2021.11",
+        bundle: "2024.0.2",
         url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/3a64aab4-3c35-40ba-bc9c-f80f136a8005/w_fortran-compiler_p_2024.0.2.27_offline.exe",
     },
     {
         version: "2021.10",
+        bundle: "2023.2.1",
         url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/1720594b-b12c-4aca-b7fb-a7d317bac5cb/w_fortran-compiler_p_2023.2.1.7_offline.exe",
     },
     {
         version: "2021.9",
+        bundle: "2023.1.0",
         url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/2a13d966-fcc5-4a66-9fcc-50603820e0c9/w_HPCKit_p_2023.1.0.46357_offline.exe",
     },
     {
         version: "2021.7",
+        bundle: "2022.3.0",
         url: "https://registrationcenter-download.intel.com/akdlm/irc_nas/18857/w_HPCKit_p_2022.3.0.9564_offline.exe",
     },
     {
         version: "2021.6",
+        bundle: "2022.2.0",
         url: "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/18680/w_HPCKit_p_2022.2.0.173_offline.exe",
     },
 ];
@@ -101361,12 +101432,7 @@ async function ifort_win32_installWin32(inputs) {
     }
     const cacheHit = await restoreCache(cachePaths, cacheKey);
     const cacheValid = cacheHit
-        ? await validateRestoredCompilerCache(`ifort ${version}`, [win32_SETVARS_BAT], "cmd", [
-            "/D",
-            "/S",
-            "/C",
-            `call "${win32_SETVARS_BAT}" --force >nul && ifort /what >nul`,
-        ])
+        ? await validateRestoredIntelWindowsCache(`ifort ${version}`, win32_SETVARS_BAT, "ifort")
         : false;
     if (cacheValid) {
         info(`Restored ifort installation from cache (${cacheHit ?? cacheKey}).`);
@@ -101378,6 +101444,7 @@ async function ifort_win32_installWin32(inputs) {
         const installerPath = await ifort_win32_downloadToolWithRetry(release.url, external_path_default().win32.join(process.env.RUNNER_TEMP ?? "C:\\Temp", `ifort-${version}.exe`));
         await verifyIntelAuthenticode(installerPath);
         info("Running silent install (this may take several minutes)...");
+        const componentArgs = await fortranComponentArgs(installerPath, release.bundle, release.url);
         await exec_exec(`"${installerPath}"`, [
             "-s",
             "-a",
@@ -101386,6 +101453,7 @@ async function ifort_win32_installWin32(inputs) {
             "accept",
             "-p=NEED_VS2019_INTEGRATION=0",
             "-p=NEED_VS2022_INTEGRATION=0",
+            ...componentArgs,
         ]);
         info("Saving installation to cache...");
         await saveCompilerCache(cachePaths, cacheKey);
