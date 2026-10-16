@@ -180,6 +180,7 @@ jobs:
         with:
           compiler: ${{ matrix.toolchain.compiler }}
           version: ${{ matrix.toolchain.version }}
+          cache: false
 
       - name: Verify installation
         shell: bash

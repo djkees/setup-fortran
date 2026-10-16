@@ -1,11 +1,11 @@
 import * as core from "@actions/core";
 import * as exec from "@actions/exec";
-import * as cache from "@actions/cache";
 import * as fs from "fs";
 import { Arch, type InstallationResult, type Inputs } from "../../types";
 import { resolveVersion } from "../../resolve_version";
 import { scopedSourceListOptions } from "../../apt_sources";
 import {
+  restoreCompilerCache,
   saveCompilerCache,
   validateRestoredCompilerCache,
 } from "../../cache_validation";
@@ -74,7 +74,11 @@ export async function installDebian(
   }
 
   const cacheKey = `oneapi-ifort-validated-v1-${inputs.arch}-${bundle}`;
-  const cacheHit = await cache.restoreCache(ONEAPI_CACHE_PATHS, cacheKey);
+  const cacheHit = await restoreCompilerCache(
+    inputs.cache,
+    ONEAPI_CACHE_PATHS,
+    cacheKey,
+  );
   const setVarsScript = `${ONEAPI_ROOT}/setvars.sh`;
   const cacheValid = cacheHit
     ? await validateRestoredCompilerCache(
@@ -112,7 +116,7 @@ export async function installDebian(
     core.info(`Installing apt packages ${fortranPkg} and ${cppPkg}...`);
     await aptGetInstallWithRetry([fortranPkg, cppPkg]);
 
-    await saveCompilerCache(ONEAPI_CACHE_PATHS, cacheKey);
+    await saveCompilerCache(inputs.cache, ONEAPI_CACHE_PATHS, cacheKey);
   } else {
     core.info(`Cache hit for ${cacheKey}, skipping installation...`);
   }
@@ -166,6 +170,7 @@ export async function installDebian(
     fc: "ifort",
     cc: bundleIs2024 ? "icx" : "icc",
     cxx: bundleIs2024 ? "icpx" : "icpc",
+    cacheHit: cacheValid,
   };
   return result;
 }
