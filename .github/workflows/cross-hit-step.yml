@@ -1,0 +1,48 @@
+name: cross-hit-step
+
+on:
+  workflow_call:
+    inputs:
+      compiler: { type: string, required: true }
+      version: { type: string, required: true }
+      expect-hit: { type: boolean, required: true }
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  run:
+    name: ${{ inputs.compiler }} ${{ inputs.version }} (expect-hit=${{ inputs.expect-hit }})
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Restore dist-verify
+        run: gh run download ${{ github.run_id }} --name generated-dist-verify --dir dist-verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Restore dist-tests
+        run: gh run download ${{ github.run_id }} --name generated-dist-tests --dir dist-tests
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Install ${{ inputs.compiler }} ${{ inputs.version }}
+        id: setup
+        uses: ./
+        with:
+          compiler: ${{ inputs.compiler }}
+          version: ${{ inputs.version }}
+      - name: Assert cache outcome
+        shell: bash
+        run: |
+          if [ -f /etc/apt/sources.list.d/oneAPI.list ]; then outcome=miss; else outcome=hit; fi
+          echo "cache outcome: $outcome (expect-hit=${{ inputs.expect-hit }})"
+          [ "$outcome" = "$([ '${{ inputs.expect-hit }}' = 'true' ] && echo hit || echo miss)" ]
+      - name: Verify installation
+        run: npm run verify-installation
+        env:
+          OUTPUT_VERSION: ${{ steps.setup.outputs.version }}
+          OUTPUT_FC: ${{ steps.setup.outputs.fc }}
+          OUTPUT_CC: ${{ steps.setup.outputs.cc }}
+          OUTPUT_CXX: ${{ steps.setup.outputs.cxx }}
+      - name: Run Integration Tests
+        run: npm run integration-test

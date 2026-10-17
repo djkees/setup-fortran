@@ -1,0 +1,29 @@
+name: cross-hit
+
+on:
+  push:
+    branches: [test/oneapi-shared-key-cross-hit]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  validation:
+    uses: ./.github/workflows/validation.yml
+  save-ifx:
+    needs: [validation]
+    uses: ./.github/workflows/cross-hit-step.yml
+    with: { compiler: ifx, version: "2024.0", expect-hit: false }
+  hit-ifort:
+    needs: [save-ifx]
+    uses: ./.github/workflows/cross-hit-step.yml
+    with: { compiler: ifort, version: "2021.11", expect-hit: true }
+  save-ifort:
+    needs: [validation]
+    uses: ./.github/workflows/cross-hit-step.yml
+    with: { compiler: ifort, version: "2021.10", expect-hit: false }
+  hit-ifx:
+    needs: [save-ifort]
+    uses: ./.github/workflows/cross-hit-step.yml
+    with: { compiler: ifx, version: "2023.2.4", expect-hit: true }
