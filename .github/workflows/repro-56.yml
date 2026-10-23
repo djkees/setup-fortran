@@ -1,0 +1,34 @@
+name: Repro 56
+on:
+  workflow_dispatch:
+  push:
+    branches: [repro-56-v1]
+jobs:
+  link:
+    name: ${{ matrix.os }} ${{ matrix.compiler }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+        compiler: [intel, intel-classic]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./
+        with:
+          compiler: ${{ matrix.compiler }}
+      - name: Which link
+        shell: bash
+        run: |
+          type -a link || true
+          ls -l /usr/bin/link* || true
+      - name: Compile and link
+        shell: bash
+        run: |
+          $FC test/hw.f90 -o hw.exe
+          ./hw.exe
+      - name: Compile and link via cmd
+        shell: cmd
+        run: |
+          %FC% test\hw.f90 -o hw2.exe
+          hw2.exe
