@@ -1,3 +1,5 @@
+import * as exec from "@actions/exec";
+
 /**
  * apt-get options that scope a command to a single source list file,
  * ignoring every other configured repository.
@@ -31,4 +33,19 @@ export function indexFetchFailed(
   repositoryHost: string,
 ): boolean {
   return output.includes("Failed to fetch") && output.includes(repositoryHost);
+}
+
+export async function aptPackageExists(pkg: string): Promise<boolean> {
+  let output = "";
+  const exitCode = await exec.exec("apt-cache", ["policy", pkg], {
+    ignoreReturnCode: true,
+    silent: true,
+    listeners: {
+      stdout: (data: Buffer) => {
+        output += data.toString();
+      },
+    },
+  });
+  const candidate = /^\s*Candidate:\s*(\S+)/m.exec(output)?.[1];
+  return exitCode === 0 && candidate !== undefined && candidate !== "(none)";
 }

@@ -4,6 +4,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { OS, type Inputs } from "./types";
+import { unavailableVersionError } from "./resolve_version";
 
 export interface LFortranEnvironment {
   root: string;
@@ -125,6 +126,27 @@ export function createInstallerTempDir(): string {
 // network, both of which can fail transiently (read timeouts, 5xx, rate
 // limits). Retrying the whole command is safe: conda reuses its package cache,
 // so a retry only re-fetches what actually failed.
+export async function assertLFortranOnConda(
+  inputs: Inputs,
+  environment: LFortranEnvironment,
+  version: string,
+): Promise<void> {
+  const exitCode = await exec.exec(
+    environment.conda,
+    [
+      "search",
+      "-c",
+      "conda-forge",
+      "--override-channels",
+      `lfortran==${version}`,
+    ],
+    { ignoreReturnCode: true, silent: true },
+  );
+  if (exitCode !== 0) {
+    throw unavailableVersionError(inputs, version, "conda-forge");
+  }
+}
+
 export async function condaCreateWithRetry(
   condaBin: string,
   args: string[],
