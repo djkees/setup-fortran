@@ -2,7 +2,11 @@ import * as core from "@actions/core";
 import * as exec from "@actions/exec";
 import * as path from "path";
 import { Arch, type InstallationResult } from "../../types";
-import { resolveVersion } from "../../resolve_version";
+import {
+  isListedVersion,
+  resolveVersion,
+  unavailableVersionError,
+} from "../../resolve_version";
 import type { Inputs } from "../../types";
 
 // Make sure the versions are always in descending order. The first one will be
@@ -15,7 +19,9 @@ export const SUPPORTED_VERSIONS = {
 export async function installDarwin(
   inputs: Inputs,
 ): Promise<InstallationResult> {
-  const version = resolveVersion(inputs, SUPPORTED_VERSIONS);
+  const version = resolveVersion(inputs, SUPPORTED_VERSIONS, {
+    allowUnlisted: true,
+  });
   core.info(
     `Installing GFortran ${version} on macOS (${inputs.arch}) via Homebrew...`,
   );
@@ -36,6 +42,15 @@ export async function installDarwin(
   if (alreadyInstalled) {
     core.info(`${formula} is already installed, skipping brew install.`);
   } else {
+    if (!isListedVersion(SUPPORTED_VERSIONS[inputs.arch], version)) {
+      const exitCode = await exec.exec("brew", ["info", "--formula", formula], {
+        ignoreReturnCode: true,
+        silent: true,
+      });
+      if (exitCode !== 0) {
+        throw unavailableVersionError(inputs, version, "Homebrew");
+      }
+    }
     await brewInstallWithRetry(formula);
   }
 

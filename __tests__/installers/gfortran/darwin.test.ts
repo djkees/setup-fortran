@@ -56,6 +56,33 @@ describe("installDarwin (gfortran)", () => {
     });
   });
 
+  it("installs a version missing from the table via Homebrew", async () => {
+    await installDarwin({ ...baseInputs, version: "99" });
+
+    expect(mockedExec).toHaveBeenCalledWith(
+      "brew",
+      ["install", "--skip-post-install", "gcc@99"],
+      expect.anything(),
+    );
+  });
+
+  it("rejects an unlisted version when Homebrew has no such formula", async () => {
+    mockedExec.mockImplementation((cmd, args) =>
+      Promise.resolve(cmd === "brew" && args?.[0] === "info" ? 1 : 0),
+    );
+
+    await expect(
+      installDarwin({ ...baseInputs, version: "99" }),
+    ).rejects.toThrow(
+      "gfortran 99 is not available from Homebrew on darwin (x64).",
+    );
+    expect(mockedExec).not.toHaveBeenCalledWith(
+      "brew",
+      expect.arrayContaining(["install"]),
+      expect.anything(),
+    );
+  });
+
   it("installs gcc via Homebrew if missing", async () => {
     await installDarwin(baseInputs);
 

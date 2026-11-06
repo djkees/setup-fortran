@@ -4,9 +4,13 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { Arch, type InstallationResult } from "../../types";
-import { resolveVersion } from "../../resolve_version";
+import {
+  isListedVersion,
+  resolveVersion,
+  unavailableVersionError,
+} from "../../resolve_version";
 import type { Inputs } from "../../types";
-import { scopedSourceListOptions } from "../../apt_sources";
+import { aptPackageExists, scopedSourceListOptions } from "../../apt_sources";
 import { verifySha256 } from "../../verify_download";
 
 // Make sure the versions are always in descending order. The first one will be
@@ -162,7 +166,9 @@ function resolveFlangBinaryPath(major: number, version: string): string {
 export async function installDebian(
   inputs: Inputs,
 ): Promise<InstallationResult> {
-  const version = resolveVersion(inputs, SUPPORTED_VERSIONS);
+  const version = resolveVersion(inputs, SUPPORTED_VERSIONS, {
+    allowUnlisted: true,
+  });
   const major = parseInt(version, 10);
   const codename = ubuntuCodename(inputs.osVersion);
 
@@ -184,6 +190,12 @@ export async function installDebian(
   await aptGetUpdateWithRetry();
 
   const pkgName = `flang-${version}`;
+  if (
+    !isListedVersion(SUPPORTED_VERSIONS[inputs.arch], version) &&
+    !(await aptPackageExists(pkgName))
+  ) {
+    throw unavailableVersionError(inputs, version, "apt");
+  }
 
   core.info(
     `Installing apt package ${pkgName} with LLVM runtime dependencies...`,

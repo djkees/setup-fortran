@@ -63,6 +63,35 @@ describe("installDebian (Flang)", () => {
     process.env = originalEnv;
   });
 
+  it("rejects an unlisted major that apt has no package for", async () => {
+    mockedExec.mockImplementation(async (commandLine, args, options) => {
+      if (commandLine === "apt-cache") {
+        options?.listeners?.stdout?.(Buffer.from("  Candidate: (none)\n"));
+      }
+      return 0;
+    });
+
+    await expect(
+      installDebian({ ...baseInputs, version: "99" }),
+    ).rejects.toThrow("flang 99 is not available from apt on linux (x64).");
+  });
+
+  it("installs a major missing from the table via apt", async () => {
+    mockedExec.mockImplementation(async (commandLine, args, options) => {
+      if (commandLine === "apt-cache") {
+        options?.listeners?.stdout?.(Buffer.from("  Candidate: 99.0.0\n"));
+      }
+      return 0;
+    });
+    await installDebian({ ...baseInputs, version: "99" });
+
+    expect(mockedExec).toHaveBeenCalledWith(
+      "sudo",
+      expect.arrayContaining(["flang-99", "clang-99"]),
+      expect.anything(),
+    );
+  });
+
   it("configures the explicit LLVM repository without executing llvm.sh", async () => {
     await installDebian(baseInputs);
 
